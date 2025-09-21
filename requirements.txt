@@ -2,3 +2,5 @@ opencv-python
 pyyaml
 ouster-sdk
 open3d
+hf_transfer
+

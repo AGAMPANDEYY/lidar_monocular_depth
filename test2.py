@@ -1,3 +1,7 @@
+"""
+Lidar to Camera Projection Correction Script test 2 after debuig script.py 
+"""
+
 import argparse, os, yaml
 import numpy as np
 import cv2
@@ -20,7 +24,7 @@ def load_ext(ext_yaml):
     t = np.array(ext["t"], dtype=np.float64).reshape(3, 1)
     return R, t
 
-def lidar_3d_to_camera_2d_projection(lidar_points, R, t, K, dist=None):
+def lidar_3d_to_camera_2d_projection(lidar_points, R, t, K, dist=None, z_forward="positive"):
     """
     Project 3D LiDAR points to 2D camera image coordinates.
     
@@ -35,6 +39,7 @@ def lidar_3d_to_camera_2d_projection(lidar_points, R, t, K, dist=None):
         t: 3x1 translation vector (LiDAR to Camera)
         K: 3x3 camera intrinsic matrix
         dist: distortion coefficients (optional)
+        z_forward: "positive" or "negative" - direction convention for forward in camera frame
     
     Returns:
         uv_points: Nx2 array of image coordinates [u, v]
@@ -43,30 +48,33 @@ def lidar_3d_to_camera_2d_projection(lidar_points, R, t, K, dist=None):
     """
     
     # Step 1: Transform LiDAR points to camera coordinate frame
-    # Using the formula from the research paper: d = R * (a - c)
-    # where a = LiDAR points, c = translation, d = camera frame points
-    
-    # Convert to homogeneous coordinates for easier matrix operations
     points_3d = lidar_points.T  # 3xN
     
     # Apply rotation and translation: P_cam = R * P_lidar + t
     camera_points = R @ points_3d + t  # 3xN
     camera_points = camera_points.T    # Nx3
     
-    # Step 2: Filter points behind camera (negative Z in camera frame)
-    # In standard camera coordinates, Z should be positive (forward)
+    # Step 2: Handle different Z-forward conventions
+    if z_forward == "negative":
+        # If negative Z is forward in your setup, flip the Z axis
+        camera_points[:, 2] = -camera_points[:, 2]
+        print(f"[INFO] Flipped Z axis - new Z range: [{camera_points[:, 2].min():.2f}, {camera_points[:, 2].max():.2f}]")
+    
+    # Filter points behind camera (should have positive Z after convention handling)
     valid_z = camera_points[:, 2] > 0.1  # min depth threshold
     
     if np.sum(valid_z) == 0:
-        print("[WARNING] No points have positive Z (in front of camera)")
+        print(f"[WARNING] No points have positive Z (in front of camera)")
+        print(f"[DEBUG] Camera Z range: [{camera_points[:, 2].min():.2f}, {camera_points[:, 2].max():.2f}]")
+        # Try with negative Z convention automatically
+        if z_forward == "positive":
+            print("[INFO] Trying negative Z convention...")
+            return lidar_3d_to_camera_2d_projection(lidar_points, R, t, K, dist, "negative")
         return np.array([]).reshape(0, 2), np.array([]), valid_z
     
     valid_points = camera_points[valid_z]
     
     # Step 3: Project to 2D using pinhole camera model
-    # Following equation (2) from the research paper:
-    # [u, v, 1]^T = K * [X, Y, Z]^T where [X,Y,Z] are camera frame coordinates
-    
     X, Y, Z = valid_points[:, 0], valid_points[:, 1], valid_points[:, 2]
     
     # Apply camera intrinsics matrix K
@@ -82,10 +90,23 @@ def lidar_3d_to_camera_2d_projection(lidar_points, R, t, K, dist=None):
     
     # Step 4: Apply distortion correction if provided
     if dist is not None and np.any(dist != 0):
-        # Reshape for cv2.undistortPoints
-        uv_distorted = uv_points.reshape(-1, 1, 2).astype(np.float32)
-        uv_undistorted = cv2.undistortPoints(uv_distorted, K, dist, P=K)
-        uv_points = uv_undistorted.reshape(-1, 2)
+        # OpenCV expects normalized coordinates for undistortion
+        # First convert to normalized coordinates
+        uv_normalized = np.column_stack([
+            (uv_points[:, 0] - cx) / fx,
+            (uv_points[:, 1] - cy) / fy
+        ])
+        
+        # Apply distortion correction
+        uv_distorted = uv_normalized.reshape(-1, 1, 2).astype(np.float32)
+        uv_undistorted = cv2.undistortPoints(uv_distorted, np.eye(3), dist)
+        uv_normalized_corrected = uv_undistorted.reshape(-1, 2)
+        
+        # Convert back to pixel coordinates
+        uv_points = np.column_stack([
+            uv_normalized_corrected[:, 0] * fx + cx,
+            uv_normalized_corrected[:, 1] * fy + cy
+        ])
     
     return uv_points, Z, valid_z
 
@@ -119,6 +140,22 @@ def create_depth_map(uv_points, depths, H, W, radius=1):
     
     return depth_map, mask
 
+def check_coordinate_alignment(lidar_points, camera_points, R, t):
+    """Debug function to check coordinate system alignment"""
+    print("\n[DEBUG] Coordinate System Analysis:")
+    
+    # Transform a few sample points
+    sample_indices = np.random.choice(len(lidar_points), min(5, len(lidar_points)), replace=False)
+    
+    for i, idx in enumerate(sample_indices):
+        lidar_pt = lidar_points[idx]
+        # Manual transformation
+        cam_pt = (R @ lidar_pt.reshape(3, 1) + t).flatten()
+        
+        print(f"  Point {i+1}:")
+        print(f"    LiDAR: [{lidar_pt[0]:6.2f}, {lidar_pt[1]:6.2f}, {lidar_pt[2]:6.2f}]")
+        print(f"    Camera: [{cam_pt[0]:6.2f}, {cam_pt[1]:6.2f}, {cam_pt[2]:6.2f}]")
+
 def visualize_projection(img, uv_points, depths, valid_mask=None):
     """Create visualization of LiDAR projection on image"""
     if valid_mask is not None:
@@ -148,9 +185,11 @@ def visualize_projection(img, uv_points, depths, valid_mask=None):
         # Apply colormap
         colors = cv2.applyColorMap((depths_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
         
-        # Draw points
-        for (u, v), color in zip(uv_inside.astype(int), colors):
-            cv2.circle(result, (u, v), 1, color[0].tolist(), -1)
+        # Draw points with different sizes based on depth
+        for (u, v), color, depth in zip(uv_inside.astype(int), colors, depths_inside):
+            # Closer points are larger
+            size = max(1, int(3 - depth/10))  # Adjust scaling as needed
+            cv2.circle(result, (u, v), size, color[0].tolist(), -1)
     
     return result
 
@@ -170,8 +209,10 @@ def main():
                     help="Manual horizontal principal point correction")
     ap.add_argument("--splat_radius", type=int, default=2, 
                     help="Radius for splatting LiDAR points in depth map (pixels)")
-    ap.add_argument("--z_forward", choices=["positive", "negative"], default="positive",
-                    help="Set LiDAR forward direction: 'positive' or 'negative' Z")
+    ap.add_argument("--z_forward", choices=["positive", "negative", "auto"], default="auto",
+                    help="Set camera Z forward direction: 'positive', 'negative', or 'auto'")
+    ap.add_argument("--debug_coords", action="store_true", 
+                    help="Print coordinate transformation debug info")
     
     args = ap.parse_args()
     
@@ -189,7 +230,8 @@ def main():
     print(f"[INFO] Image size: {H}x{W}")
     print(f"[INFO] Image center would be: cx={W/2:.1f}, cy={H/2:.1f}")
     print(f"[INFO] Principal point offset: Δcx={K[0,2]-W/2:.1f}, Δcy={K[1,2]-H/2:.1f}")
-    print(f"[INFO] Distortion coefficients: {dist}")
+    if dist is not None and np.any(dist != 0):
+        print(f"[INFO] Distortion coefficients: {dist}")
     
     print("[INFO] Loading extrinsics...")
     R, t = load_ext(args.ext_yaml)
@@ -214,31 +256,37 @@ def main():
     print(f"  Y: [{points[:, 1].min():.2f}, {points[:, 1].max():.2f}]")
     print(f"  Z: [{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
     
-    # Apply depth filtering in LiDAR frame first
-    if args.z_forward == "negative":
-        print("[INFO] Using negative Z forward direction (LiDAR)")
-        # Use all negative Z points in front projection
-        depth_mask = (points[:, 2] < 0)
-    else:
-        print("[INFO] Using positive Z forward direction (LiDAR)")
-        depth_mask = (points[:, 2] > args.min_depth) & (points[:, 2] < args.max_depth)
+    # Debug coordinate transformations if requested
+    if args.debug_coords:
+        check_coordinate_alignment(points[:100], None, R, t)  # Check first 100 points
     
-    points_filtered = points[depth_mask]
-    print(f"[INFO] After depth filtering: {len(points_filtered)} points")
+    # Apply basic filtering first (remove obvious outliers)
+    distance_from_origin = np.linalg.norm(points, axis=1)
+    reasonable_distance = (distance_from_origin > 0.1) & (distance_from_origin < args.max_depth)
+    points_filtered = points[reasonable_distance]
+    print(f"[INFO] After basic filtering: {len(points_filtered)} points")
     
     if len(points_filtered) == 0:
-        print("[ERROR] No points remain after depth filtering!")
+        print("[ERROR] No points remain after basic filtering!")
         return
     
+    # Determine Z direction
+    z_direction = args.z_forward
+    if z_direction == "auto":
+        # Try both directions and see which gives more valid projections
+        print("[INFO] Auto-detecting Z direction...")
+        z_direction = "positive"  # Start with positive
+    
     # Project LiDAR points to camera image
-    print("[INFO] Projecting LiDAR points to camera image...")
+    print(f"[INFO] Projecting LiDAR points to camera image (Z forward: {z_direction})...")
     uv_points, depths_cam, valid_mask = lidar_3d_to_camera_2d_projection(
-        points_filtered, R, t, K, dist
+        points_filtered, R, t, K, dist, z_direction
     )
     
     print(f"[INFO] Projection results:")
     print(f"  Valid projections: {len(uv_points)}")
-    print(f"  Camera depth range: [{depths_cam.min():.2f}, {depths_cam.max():.2f}]")
+    if len(depths_cam) > 0:
+        print(f"  Camera depth range: [{depths_cam.min():.2f}, {depths_cam.max():.2f}]")
     
     if len(uv_points) > 0:
         inside_image = ((uv_points[:, 0] >= 0) & (uv_points[:, 0] < W) & 
@@ -250,6 +298,12 @@ def main():
             print(f"  UV coordinate ranges:")
             print(f"    U: [{uv_inside[:, 0].min():.1f}, {uv_inside[:, 0].max():.1f}]")
             print(f"    V: [{uv_inside[:, 1].min():.1f}, {uv_inside[:, 1].max():.1f}]")
+        else:
+            print("[WARNING] No points project inside the image bounds!")
+            print("  This might indicate:")
+            print("  - Incorrect extrinsic calibration")
+            print("  - Wrong coordinate system conventions")
+            print("  - Principal point offset issues")
     
     # Create depth map
     print("[INFO] Creating depth map...")

@@ -1,146 +1,109 @@
-# LiDAR-Monocular Depth Fusion
+# LiDAR-Monocular Depth Fusion Project
 
-This project fuses LiDAR point clouds with monocular depth estimation for robust obstacle detection and depth measurement. It combines the sparse but accurate measurements from LiDAR with dense but relative depth from neural networks.
+This project fuses LiDAR point clouds with monocular depth estimation for robust depth perception.
 
-## Features
+## Setup Instructions
 
-- Calibrated fusion of LiDAR and neural monocular depth (MiDaS)
-- YOLOv8 object detection with per-object depth metrics
-- Temporal accumulation of sparse LiDAR data
-- RANSAC-based ground plane removal
-- Time-to-collision (TTC) estimation
-- Hazard detection using LiDAR point clusters
-- Efficient camera-LiDAR frame synchronization
-- Rich visualizations and debug outputs
+1. **Create and Activate Virtual Environment**
+```bash
+# Create virtual environment
+python -m venv .venv
 
-## Requirements
+# Activate on macOS/Linux
+source .venv/bin/activate
+```
 
-- Python 3.8+
-- PyTorch (for MiDaS and YOLO)
-- OpenCV
-- NumPy
-- Pandas
-- PIL
+2. **Install Dependencies**
+```bash
+pip install numpy opencv-python pillow pandas open3d ultralytics torch torchvision
+```
+
+## Pipeline Steps
+
+### 1. Extract Frames
+```bash
+python scripts/extract_frames.py --video data/input.avi --max_frames 1000
+```
+- Frames will be saved in `data/frames/front/`
+- For first 3 minutes at 30fps, use `--max_frames 5400`
+
+### 2. Calibration
+> **Note**: You only need to perform calibration ONCE if the camera and LiDAR setup remains fixed.
+
+The current calibration files are:
+- Camera intrinsics: `calibration/camera.yaml`
+- LiDAR-to-Camera extrinsics: `calibration/extrinsics_lidar_to_cam.yaml`
+
+If you need to recalibrate:
+1. Collect corresponding 3D-2D point pairs
+2. Run calibration:
+```bash
+python calibration/calibrate_extrinsics.py \
+  --cam_yaml calibration/camera.yaml \
+  --img data/frames/front/07543.png \
+  --pts3d_csv calibration/lidar_points3d.csv \
+  --pts2d_csv calibration/image_points2d.csv \
+  --out_yaml calibration/extrinsics_lidar_to_cam.yaml
+```
+
+### 3. Project LiDAR Points
+Process each LiDAR PCD file corresponding to your frames:
+```bash
+python lidar_projection/project_lidar.py \
+  --pcd "data/lidar/input (Frame XXXX).pcd" \
+  --cam_yaml calibration/camera.yaml \
+  --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
+  --image data/frames/front/XXXX.png \
+  --out_npz data/processed_lidar/XXXX.npz \
+  --debug_overlay data/processed_lidar/XXXX_overlay.png \
+  --manual_cy_offset 80 \
+  --manual_cx_offset 30
+```
+
+For batch processing multiple frames, create a script that:
+1. Lists all PCD files in `data/lidar/`
+2. Matches frame numbers between PCDs and images
+3. Runs projection for each pair
+
+### 4. Run Main Processing Pipeline
+```bash
+python main.py
+```
+
+The main pipeline will:
+- Load frame images from `data/frames/test/`
+- Load corresponding processed LiDAR data from `data/processed_lidar/`
+- Perform object detection (YOLOv8)
+- Generate monocular depth (MiDaS)
+- Fuse LiDAR and monocular depth
+- Compute TTC (Time-to-Collision) and ECW (Emergency Collision Warning)
+- Save visualizations in `data/fused_output/`
 
 ## Project Structure
-
 ```
 lidar_monocular_depth/
+├── calibration/              # Calibration scripts and data
 ├── data/
-│   ├── frames/              # Camera frames
-│   ├── processed_lidar/     # Projected LiDAR data
-│   └── fused_output/        # Visualization outputs
-├── modules/
-│   ├── detection.py         # YOLOv8 object detection
-│   ├── depth.py            # MiDaS depth estimation
-│   ├── geo.py              # Geometric operations
-│   ├── hazard.py           # Hazard detection
-│   ├── metrics.py          # TTC and depth stats
-│   ├── sync.py            # Frame synchronization
-│   └── visualization.py    # Result visualization
-├── detection/
-│   └── best-e150 (1).pt   # YOLO weights
-├── calibration/
-│   └── camera.yaml        # Camera parameters
-└── main.py                # Pipeline orchestration
+│   ├── frames/              # Extracted video frames
+│   ├── lidar/               # Raw LiDAR PCD files
+│   ├── processed_lidar/     # Projected LiDAR depth maps
+│   └── fused_output/        # Final visualization outputs
+├── modules/                  # Core processing modules
+├── scripts/                  # Utility scripts
+└── main.py                  # Main processing pipeline
 ```
-
-## Configuration
-
-Key parameters in `main.py`:
-
-```python
-# Testing configuration
-MAX_TEST_FRAMES = 15     # Maximum frames to process
-CAMERA_FPS = 25.0       # Camera frame rate
-LIDAR_FPS = 10.0        # LiDAR frame rate
-CAMERA_START = 15000    # First camera frame
-LIDAR_START = 6000      # First LiDAR frame
-
-# Research configuration
-ACCUM_WINDOW = 2        # LiDAR accumulation window
-GROUND_REMOVE = True    # RANSAC ground removal
-GROUND_HEIGHT = 0.10    # Min height above ground (m)
-ECW_Z_THRESH = 8.0      # Bubble depth threshold (m)
-```
-
-## Setup
-
-1. Create and activate a Python virtual environment:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # macOS/Linux
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install torch torchvision opencv-python pillow pandas numpy ultralytics
-   ```
-
-## Usage
-
-1. Organize data:
-   ```
-   data/
-   ├── frames/
-   │   └── front/          # Front-view camera frames
-   │       ├── 15000.png
-   │       ├── 15001.png
-   │       └── ...
-   └── processed_lidar/    # Projected LiDAR frames
-       ├── 6000.npz
-       ├── 6001.npz
-       └── ...
-   ```
-
-2. Run the pipeline:
-   ```bash
-   python main.py
-   ```
-
-3. Check outputs in `data/fused_output/`:
-   - `*_overlay.png`: Visualizations with detection boxes
-   - `debug/`: Individual depth maps and masks
-   - `object_depth_metrics.csv`: Per-object measurements
-   - `output_visualization.mp4`: Final video output
-
-## Frame Synchronization
-
-The pipeline handles different frame rates:
-- Camera: 25 FPS (frames 15000-16499)
-- LiDAR: 10 FPS (frames 6000-6599)
-
-Frames are matched using temporal alignment, finding the closest LiDAR frame for each camera frame while tracking timing statistics.
-
-## Output Format
-
-The `object_depth_metrics.csv` contains per-object measurements:
-- Frame number
-- Object class and confidence
-- Bounding box coordinates
-- LiDAR and monocular depth estimates
-- Time-to-collision (TTC)
-- ECW bubble status
-- Frame synchronization timing
 
 ## Important Notes
 
-1. **Calibration**:
-   - Camera calibration parameters must be in `calibration/camera.yaml`
-   - Current parameters work for the test sequences
+1. **Calibration Reuse**:
+   - If your camera-LiDAR setup is fixed, you DON'T need to recalibrate
+   - The current extrinsics in `calibration/extrinsics_lidar_to_cam.yaml` are valid for all frames
+   - Only recalibrate if you change the physical setup or notice significant misalignment
 
-2. **Testing Mode**:
-   - Set `MAX_TEST_FRAMES = 15` for quick testing
-   - Set to 0 or a large number for full sequence processing
+2. **LiDAR Projection**:
+   - Current offset values (`cy_offset=80`, `cx_offset=30`) work for the current setup
+   - You might need to adjust these if you recalibrate or change the setup
 
-3. **Ground Removal**:
-   - RANSAC-based ground plane removal can be disabled with `GROUND_REMOVE = False`
-   - Adjust `GROUND_HEIGHT` for different thresholds above detected plane
-
-4. **LiDAR Accumulation**:
-   - Set `ACCUM_WINDOW = 0` to disable temporal accumulation
-   - Larger windows help with sparse LiDAR data but may introduce lag
-
-## License
-
-TBD (update with chosen license)
+3. **Processing Multiple Frames**:
+   - Ensure frame numbers in filenames match between LiDAR PCDs and images
+   - The main.py script will automatically match corresponding files
