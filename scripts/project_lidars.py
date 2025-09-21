@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+import os
+import re
+import glob
+import argparse
+import subprocess
+from pathlib import Path
+
+def extract_frame_number(filename):
+    """Extract frame number from filename like 'input (Frame 1234).pcd'"""
+    match = re.search(r'Frame (\d+)', filename)
+    if match:
+        return int(match.group(1))
+    return None
+
+def convert_lidar_to_camera_frame(lidar_frame, lidar_fps=10, camera_fps=25, camera_start=15000, lidar_start=6000):
+    """Convert LiDAR frame number to corresponding camera frame number.
+    
+    Args:
+        lidar_frame: LiDAR frame number
+        lidar_fps: LiDAR frames per second (default 10)
+        camera_fps: Camera frames per second (default 25)
+        camera_start: Starting frame number for camera (default 15000)
+        lidar_start: Starting frame number for LiDAR (default 6000)
+    """
+    # Calculate time from start for this LiDAR frame
+    lidar_time = (lidar_frame - lidar_start) / lidar_fps  # time in seconds
+    # Convert to equivalent camera frame
+    camera_frame = camera_start + int(lidar_time * camera_fps)
+    return camera_frame
+
+def find_matching_image(frame_num, image_dir, max_frame_diff=5):
+    """Find matching image file for a given LiDAR frame number.
+    
+    Args:
+        frame_num: The LiDAR frame number to match
+        image_dir: Directory containing camera frames
+        max_frame_diff: Maximum allowed frame number difference
+    """
+    # Convert LiDAR frame to expected camera frame
+    camera_frame = convert_lidar_to_camera_frame(frame_num)
+    
+    # Try exact match first
+    exact_match = os.path.join(image_dir, f"{camera_frame:05d}.png")
+    if os.path.exists(exact_match):
+        print(f"Found exact frame match: LiDAR {frame_num} -> Camera {camera_frame}")
+        return exact_match, 0
+    
+    # If no exact match, find closest frame number
+    images = sorted(glob.glob(os.path.join(image_dir, "*.png")))
+    closest = None
+    min_diff = float('inf')
+    
+    for img in images:
+        basename = os.path.splitext(os.path.basename(img))[0]
+        # Skip non-frame files like rois_debug
+        if not basename.isdigit():
+            continue
+            
+        img_num = int(basename)
+        diff = abs(img_num - frame_num)
+        if diff < min_diff:
+            min_diff = diff
+            closest = img
+    
+    if closest and min_diff <= max_frame_diff:
+        print(f"Found close frame match: LiDAR {frame_num} -> Camera {os.path.splitext(os.path.basename(closest))[0]} (diff: {min_diff} frames)")
+        return closest, min_diff
+    else:
+        return None, min_diff
+
+def main():
+    parser = argparse.ArgumentParser(description='Batch process LiDAR PCD files')
+    parser.add_argument('--lidar_dir', default='data/lidar', 
+                      help='Directory containing LiDAR PCD files')
+    parser.add_argument('--image_dir', default='data/frames/front',
+                      help='Directory containing front camera frames')
+    parser.add_argument('--output_dir', default='data/processed_lidar',
+                      help='Output directory for processed NPZ files')
+    parser.add_argument('--cam_yaml', default='calibration/camera.yaml',
+                      help='Camera intrinsics YAML file')
+    parser.add_argument('--ext_yaml', default='calibration/extrinsics_lidar_to_cam.yaml',
+                      help='LiDAR-to-camera extrinsics YAML file')
+    parser.add_argument('--cy_offset', type=int, default=80,
+                      help='Manual Y-axis offset')
+    parser.add_argument('--cx_offset', type=int, default=30,
+                      help='Manual X-axis offset')
+    parser.add_argument('--start_frame', type=int, default=None,
+                      help='Start processing from this frame number')
+    parser.add_argument('--end_frame', type=int, default=None,
+                      help='Stop processing at this frame number')
+    parser.add_argument('--max_frame_diff', type=int, default=2,
+                      help='Maximum allowed frame number difference between LiDAR and camera')
+    parser.add_argument('--lidar_fps', type=int, default=10,
+                      help='LiDAR frames per second')
+    parser.add_argument('--camera_fps', type=int, default=25,
+                      help='Camera frames per second')
+    parser.add_argument('--camera_start', type=int, default=15000,
+                      help='Starting frame number for camera')
+    parser.add_argument('--lidar_start', type=int, default=6000,
+                      help='Starting frame number for LiDAR')
+    
+    args = parser.parse_args()
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Get list of all PCD files
+    pcd_files = sorted(glob.glob(os.path.join(args.lidar_dir, "*.pcd")))
+    
+    print(f"\nFrame rate information:")
+    print(f"- LiDAR: {args.lidar_fps} FPS (frames {args.lidar_start}-{args.lidar_start+599})")
+    print(f"- Camera: {args.camera_fps} FPS (frames {args.camera_start}-{args.camera_start+1499})")
+    print(f"\nFound {len(pcd_files)} PCD files")
+    
+    for pcd_file in pcd_files:
+        frame_num = extract_frame_number(pcd_file)
+        if frame_num is None:
+            print(f"Warning: Could not extract frame number from {pcd_file}")
+            continue
+            
+        # Skip if outside requested frame range
+        if args.start_frame and frame_num < args.start_frame:
+            continue
+        if args.end_frame and frame_num > args.end_frame:
+            continue
+            
+        # Find matching image
+        img_file, frame_diff = find_matching_image(frame_num, args.image_dir, args.max_frame_diff)
+        if not img_file:
+            print(f"Warning: No suitable image found for LiDAR frame {frame_num}")
+            if frame_diff != float('inf'):
+                print(f"  Closest frame was {frame_diff} frames away (max allowed: {args.max_frame_diff})")
+            continue
+            
+        # Output paths
+        out_npz = os.path.join(args.output_dir, f"{frame_num:05d}.npz")
+        out_overlay = os.path.join(args.output_dir, f"{frame_num:05d}_overlay.png")
+        
+        # Skip if already processed
+        if os.path.exists(out_npz) and os.path.exists(out_overlay):
+            print(f"Frame {frame_num} already processed, skipping...")
+            continue
+            
+        print(f"\nProcessing frame {frame_num}")
+        print(f"PCD: {pcd_file}")
+        print(f"Image: {img_file}")
+        
+        # Build command
+        cmd = [
+            "python",
+            "lidar_projection/project_lidar.py",
+            "--pcd", pcd_file,
+            "--cam_yaml", args.cam_yaml,
+            "--ext_yaml", args.ext_yaml,
+            "--image", img_file,
+            "--out_npz", out_npz,
+            "--debug_overlay", out_overlay,
+            "--manual_cy_offset", str(args.cy_offset),
+            "--manual_cx_offset", str(args.cx_offset)
+        ]
+        
+        # Run projection
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"Successfully processed frame {frame_num}")
+        except subprocess.CalledProcessError as e:
+            print(f"Error processing frame {frame_num}: {e}")
+            continue
+
+if __name__ == "__main__":
+    main()

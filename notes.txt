@@ -1,0 +1,119 @@
+1. activate venv (mac)
+
+source .venv/bin/activate
+
+deactivate
+
+2. extract frame 
+
+"""
+it would need manual ROI 
+"""
+python scripts/extract_frames.py --video data/input.avi --max_frames 1000
+
+Camera image- 07543.png data/frames/front/07543.png
+Lidar frame- data/lidar/input (Frame 2745).pcd (from veloview)
+
+3. Extrinsic CAalibration:
+
+3.1. Manually selecting points from camera frame 
+python calibration/create_image_points_csv.py --img data/frames/front/07543.png --manual --num 12 --out_csv calibration/image_points2d.csv
+output-> calibration/image_points2d.csv
+
+3.2. Mnaully selecet lidar points 
+
+python calibration/visualise/lidar_visualise.py
+
+since poiunts are less and sparse so we combine +-15 frames pcd 
+
+python calibration/utils/accumulate_pcd.py \
+  --glob data/lidar/input\ \(Frame\ 27{30..60}\).pcd \
+  --out calibration/accum_2745s.pcd \
+  --voxel 0.03
+
+3.2. Lidar points 
+
+
+python calibration/calibrate_extrinsics.py \
+  --cam_yaml calibration/camera.yaml \
+  --img data/frames/front/07543.png \
+  --pts3d_csv calibration/lidar_points3d.csv \
+  --pts2d_csv calibration/image_points2d.csv \
+  --out_yaml calibration/extrinsics_lidar_to_cam.yaml
+
+R=
+ [[-0.98346563  0.17991106 -0.02067281]
+ [-0.00156493  0.10570726  0.99439606]
+ [ 0.18108811  0.9779867  -0.10367791]] 
+t=
+ [ 0.24792871  1.39406202 -7.89461895]
+Reprojection error px: mean=4.47, max=7.19
+Wrote calib_debug/pnp_projected_points.png
+Saved LiDAR->Camera extrinsics to calibration/extrinsics_lidar_to_cam.yaml
+(.venv) agampandey@Agams-MacBook-Air lidar_monocular_depth % 
+
+
+2. Have a csv of matvching camera and lidar frames 
+
+utils/frame_sync.py
+output: 
+data/frame_matching/frame_matching_20250921_093421.csv
+
+
+3. Project Lidar : lidar_projection/project_lidar.py
+
+CLAUDE FIX 1:
+
+python lidar_projection/project_lidar.py \
+  --pcd "data/lidar/input (Frame 2745).pcd" \
+  --cam_yaml calibration/camera.yaml \
+  --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
+  --image data/frames/front/07543.png \
+  --out_npz data/processed_lidar/07543.npz \
+  --debug_overlay data/processed_lidar/07543_overlay.png \
+  --manual_cy_offset 80 \
+  --manual_cx_offset 30
+
+[LATEST]
+python lidar_projection/project_lidar.py \
+  --pcd "data/lidar/input (Frame 2745).pcd" \
+  --cam_yaml calibration/camera.yaml \
+  --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
+  --image data/frames/front/07543.png \
+  --out_npz data/processed_lidar/07543.npz \
+  --debug_overlay data/processed_lidar/07543_overlay.png \
+  --manual_cy_offset -200 \
+  --manual_cx_offset 50 \
+  --manual_roll 10 \
+  --manual_pitch -4 \
+  --manual_yaw -1
+
+  python lidar_projection/project_lidar.py \
+  --pcd 'data/lidar/input (Frame 6003).pcd' \
+  --cam_yaml calibration/camera.yaml \
+  --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
+  --image data/frames/front/15075.png \
+  --out_npz data/processed_lidar/06003.npz \
+  --debug_overlay data/processed_lidar/06003_overlay.png \
+  --manual_cy_offset -40 \
+  --manual_cx_offset 30 \
+  --min_depth 0.1 \
+  --max_depth 200.0 \
+  --splat_radius 1
+
+
+  4. Combined script for frames exttract and lidar projection 
+
+  python scripts/process_time_range.py \
+  --video data/input.avi \
+  --start_min 10 \
+  --end_min 11 \
+  --camera_fps 25 \
+  --lidar_fps 10
+
+
+   5. run main.py 
+
+  python main.py 
+
+  python main.py --camera_start 15000 --camera_end 16500 --lidar_start 6000 --lidar_end 6600
