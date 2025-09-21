@@ -101,6 +101,16 @@ python lidar_projection/project_lidar.py \
   --max_depth 200.0 \
   --splat_radius 1
 
+  test2.py 
+
+  python test2.py \
+  --pcd "data/lidar/input (Frame 2756).pcd" \
+  --cam_yaml calibration/camera.yaml \
+  --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
+  --image data/frames/front/07543.png \
+  --out_npz data/processed_lidar/07543.npz \
+  --debug_overlay data/processed_lidar/07543_overlay.png   --manual_cy_offset -120
+
 
   4. Combined script for frames exttract and lidar projection 
 
@@ -117,3 +127,7 @@ python lidar_projection/project_lidar.py \
   python main.py 
 
   python main.py --camera_start 15000 --camera_end 16500 --lidar_start 6000 --lidar_end 6600
+
+  python main.py --camera_start 15000 --camera_end 16500 --lidar_start 6000 --lidar_end 6600 --depth_backend midas \
+  --ecw_top 0.55 --ecw_bot 0.85 --ecw_top_w 0.20 --ecw_bot_w 0.90 \
+  --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 --miss_dilate 10

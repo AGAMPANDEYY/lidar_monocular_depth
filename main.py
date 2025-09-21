@@ -104,6 +104,14 @@ def main():
     parser.add_argument('--depth_backend', type=str, default='zoe',
                     choices=['fastdepth','zoe', 'midas'],
                     help="Monocular depth backend: 'zoe' (HuggingFace) or 'midas' or 'fastdepth'")
+    parser.add_argument('--ecw_top',   type=float, default=0.55, help='ECW top y (0..1 of H)')
+    parser.add_argument('--ecw_bot',   type=float, default=0.95, help='ECW bottom y (0..1 of H)')
+    parser.add_argument('--ecw_top_w', type=float, default=0.20, help='ECW top width as fraction of W')
+    parser.add_argument('--ecw_bot_w', type=float, default=0.90, help='ECW bottom width as fraction of W')
+    parser.add_argument('--miss_near_m', type=float, default=18.0, help='flag blobs nearer than this (m)')
+    parser.add_argument('--miss_far_m',  type=float, default=120.0, help='and farther than this (m)')
+    parser.add_argument('--miss_min_px', type=int,   default=400,  help='minimum blob area in pixels')
+    parser.add_argument('--miss_dilate', type=int,   default=10,   help='dilation (px) around YOLO boxes to avoid borderline merges')
 
     args = parser.parse_args()
 
@@ -273,24 +281,115 @@ def main():
         if valid == 0:
             print("  [LIDAR][WARN] 0 valid px — calibration/sync suspect")
 
-        # Scale MiDaS to meters using overlap with LiDAR
+        # --- Convert MiDaS relative to metric meters using LiDAR overlap ---
         eps = 1e-6
-        overlap = Mlidar_small & np.isfinite(depth_map) & (depth_map > 0)
-        if overlap.sum() >= 50:
-            scale = float(np.median(Dlidar_small[overlap] / (depth_map[overlap] + eps)))
-            if not np.isfinite(scale) or scale <= 0:
-                scale = 1.0
+        if args.depth_backend == 'midas':
+            overlap = Mlidar_small & np.isfinite(depth_map) & np.isfinite(Dlidar_small) & (Dlidar_small > 0)
+            if overlap.sum() >= 200:
+                r = depth_map[overlap].astype(np.float32)
+                z = Dlidar_small[overlap].astype(np.float32)
+                r_lo, r_hi = np.percentile(r, [2, 98])
+                if r_hi <= r_lo:
+                    r_lo, r_hi = float(r.min()), float(r.max())
+                x = (r - r_lo) / (r_hi - r_lo + eps)
+                x = np.clip(x, 0.0, 1.0)
+                y = 1.0 / np.clip(z, 0.05, 200.0)
+                y_med = np.median(y)
+                mad = np.median(np.abs(y - y_med)) + eps
+                keep = np.abs(y - y_med) <= 3.5 * mad
+                x, y = x[keep], y[keep]
+                if x.size > 30000:
+                    idx = np.random.choice(x.size, 30000, replace=False)
+                    x, y = x[idx], y[idx]
+                X = np.stack([x, np.ones_like(x)], axis=1)
+                sol, *_ = np.linalg.lstsq(X, y, rcond=None)
+                A, B = float(sol[0]), float(sol[1])
+                r_full = depth_map.astype(np.float32)
+                x_full = (r_full - r_lo) / (r_hi - r_lo + eps)
+                x_full = np.clip(x_full, 0.0, 1.0)
+                depth_mono_m = 1.0 / np.clip(A * x_full + B, 1e-4, 1e4)
+                depth_mono_m = np.clip(depth_mono_m, 0.1, 120.0)
+                print(f"  [CAL] fit AB using {x.size} pts: A={A:.6f}, B={B:.6f} -> min≈{1.0/(A+B+eps):.2f} m, max≈{1.0/(B+eps):.2f} m (from overlap)")
+            else:
+                print("  [CAL][WARN] insufficient overlap; using median-ratio scale fallback")
+                overlap2 = Mlidar_small & np.isfinite(depth_map) & (depth_map > 0)
+                if overlap2.sum() >= 50:
+                    scale = float(np.median(Dlidar_small[overlap2] / (depth_map[overlap2] + eps)))
+                else:
+                    scale = 1.0
+                depth_mono_m = np.clip(depth_map * scale, 0.1, 120.0)
         else:
-            scale = 1.0
-        depth_midas_m = np.clip(depth_map * scale, 0.1, 80.0)
-        print(f"  [CAL] overlap={int(overlap.sum())}, mono_scale={scale:.3f}")
+            overlap = Mlidar_small & np.isfinite(depth_map) & (depth_map > 0)
+            if overlap.sum() >= 50:
+                scale = float(np.median(Dlidar_small[overlap] / (depth_map[overlap] + eps)))
+                if not np.isfinite(scale) or scale <= 0:
+                    scale = 1.0
+            else:
+                scale = 1.0
+            depth_mono_m = np.clip(depth_map * scale, 0.1, 80.0)
+            print(f"  [CAL] overlap={int(overlap.sum())}, mono_scale={scale:.3f}")
 
         # Fuse depths
-        fused_depth, Wlidar, Mfused = fuse_confidence(Dlidar_small, Mlidar_small, depth_midas_m)
+        fused_depth, Wlidar, Mfused = fuse_confidence(Dlidar_small, Mlidar_small, depth_mono_m)
         print(f"  [FUSE] mean LiDAR weight: {float(np.nanmean(Wlidar)):.3f}; fused finite px: {int(np.isfinite(fused_depth).sum())}")
 
+        # ---------- Missed obstacle detection inside ECW (depth blobs not covered by YOLO) ----------
+        # 3.1 ECW mask (trapezoid ahead of ego)
+        ECW_mask, ECW_poly = make_ecw_mask(
+            H, W, args.ecw_top, args.ecw_bot, args.ecw_top_w, args.ecw_bot_w
+        )
+
+        # 3.2 Detected-objects mask (dilate to give YOLO some margin)
+        det_mask = np.zeros((H, W), dtype=np.uint8)
+        for box in pred_bboxes:
+            x1, y1, x2, y2 = map(int, box[:4])
+            x1 = max(0, min(x1, W-1)); x2 = max(0, min(x2, W-1))
+            y1 = max(0, min(y1, H-1)); y2 = max(0, min(y2, H-1))
+            det_mask[y1:y2+1, x1:x2+1] = 1
+        if args.miss_dilate > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (args.miss_dilate, args.miss_dilate))
+            det_mask = cv2.dilate(det_mask, k, iterations=1).astype(bool)
+        else:
+            det_mask = det_mask.astype(bool)
+
+        # 3.3 Candidate pixels = in ECW, valid fused depth, close enough, and NOT inside any detection
+        valid_depth = np.isfinite(fused_depth)
+        near = fused_depth >= args.miss_near_m
+        far  = fused_depth <= args.miss_far_m
+        cand = ECW_mask & valid_depth & near & far & (~det_mask)
+
+        # Optional smoothing / closing to connect sparse LiDAR projections
+        if cand.any():
+            k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+            cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_CLOSE, k2, iterations=1).astype(bool)
+
+        missed_boxes = []
+        if cand.any():
+            # 3.4 Connected components to get blobs
+            num, labels = cv2.connectedComponents(cand.astype(np.uint8), connectivity=8)
+            for lab in range(1, num):
+                blob = labels == lab
+                area = int(blob.sum())
+                if area < args.miss_min_px:
+                    continue
+
+                # Bounding box
+                ys, xs = np.where(blob)
+                y1, y2 = int(ys.min()), int(ys.max())
+                x1, x2 = int(xs.min()), int(xs.max())
+
+                # Median fused depth (meters) within blob
+                z_vals = fused_depth[blob]
+                z_vals = z_vals[np.isfinite(z_vals)]
+                if z_vals.size == 0:
+                    continue
+                z_med = float(np.median(z_vals))
+
+                missed_boxes.append((x1, y1, x2, y2, z_med))
+
         # Debug panels
-        dm = depth_midas_m.copy()
+        # Use depth_mono_m for visualization
+        dm = depth_mono_m.copy()
         dm[~np.isfinite(dm)] = 0
         dm_norm = (dm - np.nanmin(dm)) / (np.nanmax(dm) - np.nanmin(dm) + 1e-6)
         mono_color = cv2.applyColorMap((dm_norm*255).astype(np.uint8), cv2.COLORMAP_MAGMA)
@@ -337,7 +436,7 @@ def main():
             xi2, yi2 = cx + 2*dx, cy + 2*dy
             xi1 = max(0, xi1); yi1 = max(0, yi1); xi2 = min(W-1, xi2); yi2 = min(H-1, yi2)
 
-            mono_patch  = depth_midas_m[yi1:yi2, xi1:xi2]
+            mono_patch  = depth_mono_m[yi1:yi2, xi1:xi2]
             lidar_patch = Dlidar_small[yi1:yi2, xi1:xi2]
             mask_patch  = Mlidar_small[yi1:yi2, xi1:xi2]
 
@@ -357,7 +456,7 @@ def main():
             d_lidar = robust_box_depth(Dlidar_small, [x1,y1,x2,y2], mask=Mlidar_small)
             d_fused = robust_box_depth(fused_depth, [x1,y1,x2,y2], mask=np.isfinite(fused_depth))
             depth_for_ttc = d_lidar if np.isfinite(d_lidar) else d_fused
-            ttc, dzdt = ttc_tracker.update_and_compute(obj_idx, depth_for_ttc, t_now, ego_speed=ego_speed)
+            ttc, dzdt = ttc_tracker.update_and_compute(base_obj_count + j, d_use, t_now, ego_speed=ego_speed)
             ttc_list.append(ttc)
 
             ecw, _ = compute_ecw_bubble([x1, y1, x2, y2], fused_depth)
@@ -375,16 +474,71 @@ def main():
                 "ecw_bubble": ecw
             })
 
+            # Print per-object depth for debug
+            print(f"    [OBJ][{obj_idx}] class={CLASSES[cls]}, conf={conf:.2f}, mono_depth={mono_depth_val:.2f}m, lidar_depth={lidar_depth_val:.2f}m")
+
         print(f"  [OBJ] boxes: {len(bboxes)}")
 
+        # ---------- Add missed obstacles as pseudo-objects ----------
+        base_obj_count = len(bboxes)  # continue indices for TTC tracker
+        for j, (x1, y1, x2, y2, z_med) in enumerate(missed_boxes):
+            # guard tight coords
+            x1 = max(0, min(x1, W-1)); x2 = max(0, min(x2, W-1))
+            y1 = max(0, min(y1, H-1)); y2 = max(0, min(y2, H-1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            # Per-box medians from maps (consistent with regular flow)
+            mono_patch = depth_mono_m[y1:y2, x1:x2]
+            lidar_patch = Dlidar_small[y1:y2, x1:x2]
+            mask_patch  = Mlidar_small[y1:y2, x1:x2]
+
+            mono_vals  = mono_patch[np.isfinite(mono_patch)]
+            lidar_vals = lidar_patch[mask_patch]
+            mono_depth_val  = float(np.median(mono_vals))  if mono_vals.size  > 0 else np.nan
+            lidar_depth_val = float(np.median(lidar_vals)) if lidar_vals.size > 0 else np.nan
+
+            # TTC using fused depth (preferred) or LiDAR-in-box if available
+            t_now = idx / fps_for_ttc
+            d_fused = robust_box_depth(fused_depth, [x1,y1,x2,y2], mask=np.isfinite(fused_depth))
+            d_use   = d_fused if np.isfinite(d_fused) else z_med
+            ttc, dzdt = ttc_tracker.update_and_compute(base_obj_count + j, d_use, t_now, ego_speed=ego_speed)      
+            ttc_list.append(ttc)
+            # Append as a new “missed” class with low confidence
+            bboxes.append([x1, y1, x2, y2])
+            classes.append("Missed")         # or "Unknown"
+            confidences.append(0.01)         # visualization only
+            mono_depths.append(mono_depth_val)
+            lidar_depths.append(lidar_depth_val)
+
+            # ECW bubble flag true (since these are by construction inside ECW)
+            ecw, _ = compute_ecw_bubble([x1, y1, x2, y2], fused_depth)
+            ecw_bubbles.append(True if ecw is not None else True)
+
+            csv_rows.append({
+                "frame": frame_id,
+                "class": "Missed",
+                "confidence": 0.01,
+                "bbox": (x1, y1, x2, y2),
+                "mono_median_depth": mono_depth_val,
+                "lidar_median_depth": lidar_depth_val,
+                "ttc": ttc,
+                "ecw_bubble": True,
+            })
+
+            print(f"    [MISS][{j}] bbox=({x1},{y1},{x2},{y2}) median_fused≈{z_med:.2f}m TTC={ttc:.2f}s")
+
         # Final overlay
-        base_rgb = paint_depth_background(img_np, depth_midas_m, mask=np.isfinite(depth_midas_m),
+        base_rgb = paint_depth_background(img_np, depth_mono_m, mask=np.isfinite(depth_mono_m),
                                           cmap=cv2.COLORMAP_MAGMA)
         base_rgb = paint_depth_background(base_rgb, Dlidar_small, mask=Mlidar_small,
                                           alpha_fg=0.9, alpha_bg=0.1, cmap=cv2.COLORMAP_TURBO)
 
+        # draw ECW polygon for debug (on base_rgb)
+        base_dbg = base_rgb.copy()
+        cv2.polylines(base_dbg, [ECW_poly], isClosed=True, color=(255,255,0), thickness=2)
         final_img = overlay_results(
-            base_rgb, bboxes, classes, confidences,
+            base_dbg, bboxes, classes, confidences,
             lidar_depths, mono_depths, ttc_list, ecw_bubbles
         )
 
@@ -406,6 +560,28 @@ def main():
     print(f"[OUT] CSV:   {csv_path}")
     print(f"[OUT] Video: {video_path}")
     print(f"[OUT] Debug: {DBG_DIR}")
+
+def make_ecw_mask(H, W, top_y, bot_y, top_w, bot_w):
+    """
+    Trapezoid in front of ego: widths are fractions of W; y are fractions of H.
+    Returns boolean mask [H,W].
+    """
+    import numpy as np, cv2
+    y1 = int(top_y * H); y2 = int(bot_y * H)
+    half_top = int(0.5 * top_w * W)
+    half_bot = int(0.5 * bot_w * W)
+    cx = W // 2
+
+    poly = np.array([
+        [cx - half_top, y1],
+        [cx + half_top, y1],
+        [cx + half_bot, y2],
+        [cx - half_bot, y2],
+    ], dtype=np.int32)
+
+    mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.fillPoly(mask, [poly], 1)
+    return mask.astype(bool), poly
 
 if __name__ == '__main__':
     main()
