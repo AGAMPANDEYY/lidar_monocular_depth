@@ -1,0 +1,34 @@
+crop_dimensions:
+  front:
+    height: 279
+    width: 352
+  left:
+    height: 279
+    width: 352
+  rear:
+    height: 279
+    width: 352
+  right:
+    height: 279
+    width: 352
+rois:
+  front:
+  - 0
+  - 0
+  - 352
+  - 279
+  left:
+  - 352
+  - 279
+  - 704
+  - 558
+  rear:
+  - 0
+  - 279
+  - 352
+  - 558
+  right:
+  - 352
+  - 0
+  - 704
+  - 279

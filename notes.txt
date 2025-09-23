@@ -132,8 +132,31 @@ python lidar_projection/project_lidar.py \
   --ecw_top 0.55 --ecw_bot 0.85 --ecw_top_w 0.20 --ecw_bot_w 0.90 \
   --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 --miss_dilate 10
 
+ python main.py --camera_start 18000 --camera_end 19500 --lidar_start 7206 --lidar_end 7806 --depth_backend midas \
+  --ecw_top 0.55 --ecw_bot 0.85 --ecw_top_w 0.20 --ecw_bot_w 0.90 \
+  --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 --miss_dilate 10
+
+# running from 12 min to end of video main.py 
+
+python main.py --camera_start 18000 --camera_end 54736 --lidar_start 7206 --lidar_end 21758 --depth_backend midas \
+  --ecw_top 0.55 --ecw_bot 0.85 --ecw_top_w 0.20 --ecw_bot_w 0.90 \
+  --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 --miss_dilate 10 \
+--max_frames 36736 
 
 
+#running for 5minutes 
+
+
+python main.py \
+  --camera_start 18000 --camera_end 21000 \
+  --lidar_start 7206 --lidar_end 8406 \
+  --depth_backend midas \
+  --ecw_top 0.55 --ecw_bot 0.85 --ecw_top_w 0.20 \
+  --ecw_bot_w 0.90 \
+  --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 \
+  --miss_dilate 10 \
+  --max_frames 3000
+  
   OLD INTRSICS Extrinsic
 
   K: [
@@ -150,3 +173,33 @@ R:
   - [-0.00156493, 0.10570726, 0.99439606]
   - [0.18108811, 0.9779867, -0.10367791]
 t: [0.24792871, 1.39406202, -7.89461895]
+
+
+
+6. Latest to run main.py and evaluate the results 
+
+
+To get more extensive results, you should:
+
+Increase the number of frames processed:
+
+python main.py --ecw_use_fused --max_frames 100
+
+Run with different depth backends to compare:
+
+python main.py --ecw_use_fused --depth_backend zoe --max_frames 100
+python main.py --ecw_use_fused --depth_backend midas --max_frames 100
+python main.py --ecw_use_fused --depth_backend fastdepth --max_frames 100
+
+Then evaluate all results:
+
+python eval/compare_fusion.py --data_dir data/fused_output
+
+This will give you comprehensive tables showing:
+
+Depth accuracy improvements with fusion
+ECW detection performance
+Pipeline timing across different backends
+Object-level depth statistics
+
+

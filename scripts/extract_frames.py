@@ -11,6 +11,20 @@ from pathlib import Path
 
 VIEW_NAMES_DEFAULT = ["front", "right", "rear", "left"]  # TL, TR, BL, BR
 
+def load_camera_dimensions(camera_yaml):
+    """Load camera dimensions from calibration YAML."""
+    if not camera_yaml or not os.path.exists(camera_yaml):
+        return None
+        
+    with open(camera_yaml, 'r') as f:
+        data = yaml.safe_load(f)
+    
+    if 'size' in data:
+        width, height = data['size']
+        return {'width': width, 'height': height}
+    
+    return None
+
 def extract_frames(video_path, output_dir, start_frame=None, end_frame=None, max_frames=None):
     """Extract frames from video with frame range support."""
     os.makedirs(output_dir, exist_ok=True)
@@ -84,19 +98,30 @@ def manual_select_rois(img_bgr, names=VIEW_NAMES_DEFAULT):
                 print("Make sure to click and drag to create a non-zero size selection.")
     return rois
 
-def save_rois(rois, out_yaml, names=VIEW_NAMES_DEFAULT):
-    """Save ROIs to YAML file."""
-    data = { names[i]: [int(v) for v in rois[i]] for i in range(4) }
+def save_rois(rois, out_yaml, names=VIEW_NAMES_DEFAULT, crop_dimensions=None):
+    """Save ROIs and crop dimensions to YAML file."""
+    data = {
+        'rois': { names[i]: [int(v) for v in rois[i]] for i in range(4) },
+        'crop_dimensions': crop_dimensions if crop_dimensions else {}
+    }
     os.makedirs(os.path.dirname(out_yaml), exist_ok=True)
     with open(out_yaml, "w") as f:
         yaml.safe_dump(data, f)
-    print(f"Saved ROIs to {out_yaml}")
+    print(f"Saved ROIs and crop dimensions to {out_yaml}")
 
 def load_rois(yaml_path, names=VIEW_NAMES_DEFAULT):
-    """Load ROIs from YAML file."""
+    """Load ROIs and crop dimensions from YAML file."""
     with open(yaml_path, "r") as f:
         d = yaml.safe_load(f)
-    return [tuple(d[n]) for n in names]
+    
+    # Handle both old format (direct ROIs) and new format (with 'rois' key)
+    rois_data = d.get('rois', d)  # If no 'rois' key, assume old format
+    rois = [tuple(rois_data[n]) for n in names]
+    
+    # Get crop dimensions if available
+    crop_dimensions = d.get('crop_dimensions', {})
+    
+    return rois, crop_dimensions
 
 def draw_rois_debug(img, rois, names=VIEW_NAMES_DEFAULT, out_path=None):
     """Draw ROIs on image for visualization."""
@@ -110,22 +135,102 @@ def draw_rois_debug(img, rois, names=VIEW_NAMES_DEFAULT, out_path=None):
         print("Wrote", out_path)
     return vis
 
-def crop_with_rois(frames_dir, out_dir, rois, names=VIEW_NAMES_DEFAULT, limit=None, resize_to=None):
-    """Crop frames using the defined ROIs."""
+def crop_with_rois(frames_dir, out_dir, rois, names=VIEW_NAMES_DEFAULT, limit=None, resize_to=None, 
+                expected_dimensions=None, camera_dimensions=None, start_frame=None, end_frame=None):
+    """Crop frames using the defined ROIs.
+    Args:
+        frames_dir: Directory containing input frames
+        out_dir: Directory to save cropped frames
+        rois: List of ROIs for each view
+        names: List of view names
+        limit: Maximum number of frames to process
+        resize_to: Tuple of (width, height) to resize crops to
+        expected_dimensions: Optional dict of expected dimensions to verify against
+        camera_dimensions: Optional dict with camera calibration dimensions
+        start_frame: Optional starting frame number
+        end_frame: Optional ending frame number
+    Returns:
+        dict: Crop dimensions for each view
+    """
+    # Store crop dimensions for each view
+    crop_dimensions = {}
+    
     # Validate ROIs
     for i, (x1,y1,x2,y2) in enumerate(rois):
         if x2 <= x1 or y2 <= y1:
             raise ValueError(f"Invalid ROI for {names[i]}: ({x1},{y1},{x2},{y2}). Ensure proper selection.")
+        
+        # Calculate dimensions
+        width, height = x2-x1, y2-y1
+        crop_dimensions[names[i]] = {'width': width, 'height': height}
+        
+        # Verify against camera calibration dimensions if provided
+        if camera_dimensions:
+            if width != camera_dimensions['width'] or height != camera_dimensions['height']:
+                print(f"Warning: ROI dimensions for {names[i]} ({width}x{height}) don't match camera calibration ({camera_dimensions['width']}x{camera_dimensions['height']})")
+                print("Adjusting ROI to match calibration dimensions...")
+                # Adjust ROI while keeping the center point
+                center_x = (x1 + x2) // 2
+                center_y = (y1 + y2) // 2
+                half_width = camera_dimensions['width'] // 2
+                half_height = camera_dimensions['height'] // 2
+                x1 = center_x - half_width
+                x2 = center_x + half_width
+                y1 = center_y - half_height
+                y2 = center_y + half_height
+                width = camera_dimensions['width']
+                height = camera_dimensions['height']
+                rois[i] = (x1, y1, x2, y2)
+        
+        # Verify against expected dimensions if provided
+        if expected_dimensions and names[i] in expected_dimensions:
+            expected = expected_dimensions[names[i]]
+            if 'width' in expected and expected['width'] != width:
+                raise ValueError(f"ROI width mismatch for {names[i]}: got {width}, expected {expected['width']}")
+            if 'height' in expected and expected['height'] != height:
+                raise ValueError(f"ROI height mismatch for {names[i]}: got {height}, expected {expected['height']}")
+        
+        if resize_to:
+            crop_dimensions[names[i]].update({'resize_width': resize_to[0], 'resize_height': resize_to[1]})
     
     # Create output directories
     for name in names:
         os.makedirs(os.path.join(out_dir, name), exist_ok=True)
     
-    # Get and sort input files
-    files = sorted([f for f in os.listdir(frames_dir) if f.endswith(".png")])
-    if limit: files = files[:limit]
+    # Get and sort input files for the specified frame range
+    files = []
+    frame_range = None
     
-    print(f"\nCropping {len(files)} frames into views...")
+    if start_frame is not None and end_frame is not None:
+        # Only process files in the specified frame range
+        frame_range = range(start_frame, end_frame + 1)
+        files = [f"{num:05d}.png" for num in frame_range]
+        # Verify files exist
+        missing_files = [f for f in files if not os.path.exists(os.path.join(frames_dir, f))]
+        if missing_files:
+            print(f"Warning: {len(missing_files)} frames not found in range {start_frame}-{end_frame}")
+            files = [f for f in files if f not in missing_files]
+    else:
+        # If no range specified, process all files
+        files = sorted([f for f in os.listdir(frames_dir) if f.endswith(".png")])
+        
+    if not files:
+        print(f"No frames found in directory: {frames_dir}")
+        if frame_range:
+            print(f"Expected frames in range: {start_frame}-{end_frame}")
+    
+    if limit: 
+        files = files[:limit]
+        print(f"Limiting to {limit} frames")
+    
+    total_frames = len(files)
+    if total_frames == 0:
+        print("No frames to process!")
+        return crop_dimensions
+        
+    print(f"\nCropping {total_frames} frames into views...")
+    
+    processed_count = 0
     for fname in files:
         img = cv2.imread(os.path.join(frames_dir, fname))
         if img is None:
@@ -139,9 +244,12 @@ def crop_with_rois(frames_dir, out_dir, rois, names=VIEW_NAMES_DEFAULT, limit=No
             out_path = os.path.join(out_dir, names[i], fname)
             if not cv2.imwrite(out_path, crop):
                 print(f"Warning: Failed to save crop to {out_path}")
-                
-        if len(files) > 100 and len(files) % 100 == 0:
-            print(f"Processed {len(files)} frames...")
+        
+        processed_count += 1
+        if processed_count % 100 == 0:
+            print(f"Processed {processed_count}/{total_frames} frames... ({(processed_count/total_frames)*100:.1f}%)")
+    
+    return crop_dimensions
 
 def main():
     parser = argparse.ArgumentParser(description="Extract frames from video and crop views")
@@ -152,13 +260,16 @@ def main():
     parser.add_argument("--end_frame", type=int, help="End frame number")
     parser.add_argument("--max_frames", type=int, help="Maximum number of frames")
     parser.add_argument("--rois_yaml", help="Path to ROIs YAML file (if exists)")
+    parser.add_argument("--camera_yaml", help="Path to camera calibration YAML (for dimensions)")
     parser.add_argument("--resize_w", type=int, help="Resize crops to this width")
     parser.add_argument("--resize_h", type=int, help="Resize crops to this height")
     
     args = parser.parse_args()
     
-    # Extract frames first
-    frames_dir = os.path.join(args.output_dir, "raw")  # Store raw frames in 'raw' subdirectory
+    # Create output directories
+    frames_dir = os.path.join(args.output_dir, "raw")
+    os.makedirs(frames_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     success = extract_frames(args.video, frames_dir,
                            args.start_frame, args.end_frame,
                            args.max_frames)
@@ -173,12 +284,24 @@ def main():
     
     img0 = cv2.imread(os.path.join(frames_dir, frame_files[0]))
     
+    # Load camera calibration dimensions if available
+    camera_dimensions = None
+    if args.camera_yaml:
+        camera_dimensions = load_camera_dimensions(args.camera_yaml)
+        if camera_dimensions:
+            print(f"Loaded camera dimensions from calibration: {camera_dimensions['width']}x{camera_dimensions['height']}")
+    
     # Load or select ROIs
     rois = None
+    crop_dimensions = None
     if args.rois_yaml and os.path.exists(args.rois_yaml):
         print(f"Loading ROIs from {args.rois_yaml}")
-        rois = load_rois(args.rois_yaml)
+        rois, crop_dimensions = load_rois(args.rois_yaml)
+        print("Loaded existing crop dimensions:", crop_dimensions)
     else:
+        if camera_dimensions:
+            print("Please select ROIs matching camera calibration dimensions:", 
+                  f"{camera_dimensions['width']}x{camera_dimensions['height']}")
         rois = manual_select_rois(img0)
         if args.rois_yaml:
             save_rois(rois, args.rois_yaml)
@@ -192,7 +315,19 @@ def main():
     if args.resize_w and args.resize_h:
         resize_to = (args.resize_w, args.resize_h)
     
-    crop_with_rois(frames_dir, args.output_dir, rois, resize_to=resize_to)
+    new_crop_dimensions = crop_with_rois(
+        frames_dir, args.output_dir, rois, 
+        resize_to=resize_to, 
+        expected_dimensions=crop_dimensions,
+        camera_dimensions=camera_dimensions,
+        start_frame=args.start_frame,
+        end_frame=args.end_frame
+    )
+    
+    # Update ROIs yaml with dimensions if saving
+    if args.rois_yaml:
+        save_rois(rois, args.rois_yaml, crop_dimensions=crop_dimensions)
+    
     print("Frame extraction and cropping complete.")
     return 0
 
