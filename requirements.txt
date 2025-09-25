@@ -3,4 +3,5 @@ pyyaml
 ouster-sdk
 open3d
 hf_transfer
+tqdm>=4.65.0
 

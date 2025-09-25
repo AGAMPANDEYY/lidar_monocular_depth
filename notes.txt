@@ -156,7 +156,18 @@ python main.py \
   --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 \
   --miss_dilate 10 \
   --max_frames 3000
-  
+
+  python main.py \
+  --camera_start 18000 --camera_end 21000 \
+  --lidar_start 7206 --lidar_end 8406 \
+  --depth_backend midas \
+  --ecw_top 0.55 --ecw_bot 0.85 --ecw_top_w 0.20 \
+  --ecw_bot_w 0.90 \
+  --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 \
+  --miss_dilate 10 \
+  --max_frames 3000 \
+  --ecw_use_fused
+
   OLD INTRSICS Extrinsic
 
   K: [
@@ -203,3 +214,7 @@ Pipeline timing across different backends
 Object-level depth statistics
 
 
+
+ABLATION STUDIES 
+
+python scripts/run_ablation_study.py --data_dir data/fused_output

@@ -1,551 +1,1237 @@
+#!/usr/bin/env python3
 import os
+import ast
 import numpy as np
 import pandas as pd
 from glob import glob
-from metrics_depth import rmse_rel
 
-def load_depth_data(base_dir, frame_id):
-    """Load all depth maps for a given frame."""
-    npy_base = os.path.join(base_dir, "debug", f"{frame_id}")
-    return {
-        'fused': np.load(f"{npy_base}_fused_depth.npy"),
-        'mono': np.load(f"{npy_base}_mono_depth.npy"),
-        'lidar': np.load(f"{npy_base}_lidar_depth.npy"),
-        'lidar_mask': np.load(f"{npy_base}_lidar_mask.npy").astype(bool)
-    }
+EPS = 1e-6
 
-def compute_depth_metrics(pred, gt, mask):
-    """Compute standard depth estimation metrics."""
-    p = pred[mask]
-    g = gt[mask]
-    
-    # Scale-invariant metrics
-    ratio = p / g
-    a1 = np.mean((ratio > 0.8) & (ratio < 1.25))
-    a2 = np.mean((ratio > 0.5) & (ratio < 2.0))
-    
-    # Scale-dependent metrics
-    abs_rel = np.mean(np.abs(p - g) / g)
-    sq_rel = np.mean(((p - g) ** 2) / g)
-    rmse = np.sqrt(np.mean((p - g) ** 2))
-    rmse_log = np.sqrt(np.mean((np.log(p) - np.log(g)) ** 2))
-    
-    return {
-        'abs_rel': abs_rel,
-        'sq_rel': sq_rel,
-        'rmse': rmse,
-        'rmse_log': rmse_log,
-        'a1': a1,  # delta < 1.25
-        'a2': a2   # delta < 2.0
-    }
+# -------------------------------
+# Utilities
+# -------------------------------
 
-def compare_depth_methods(base_dir):
-    """Compare depth estimation quality: Mono vs Fused (using LiDAR as GT)."""
-    # Load object metrics CSV
-    obj_df = pd.read_csv(os.path.join(base_dir, 'object_depth_metrics.csv'))
-    
-    # 1. Box-level depth accuracy
-    print("\n=== Box-Level Depth Accuracy ===")
-    # Filter for detected objects only (not missed)
-    det_df = obj_df[obj_df['source'] == 'det'].copy()
-    
-    # Compute metrics using LiDAR as GT where available
-    lidar_mask = det_df['lidar_median_depth'].notna()
-    mono_err = np.abs(det_df.loc[lidar_mask, 'mono_median_depth'] - 
-                     det_df.loc[lidar_mask, 'lidar_median_depth'])
-    fused_err = np.abs(det_df.loc[lidar_mask, 'fused_median_depth'] - 
-                      det_df.loc[lidar_mask, 'lidar_median_depth'])
-    
-    box_metrics = {
-        'Method': ['Mono', 'Fused'],
-        'MAE (m)': [mono_err.mean(), fused_err.mean()],
-        'RMSE (m)': [np.sqrt((mono_err**2).mean()), 
-                     np.sqrt((fused_err**2).mean())]
-    }
-    print("\nBox-Level Depth Error (vs LiDAR):")
-    print(pd.DataFrame(box_metrics).round(3))
+def classify_environment(frame_id):
+    """Classify environment based on frame_id or other metadata.
+    Returns: 'urban', 'semi-urban', or 'highway'
+    """
+    # This is a placeholder - you should implement proper classification
+    # based on your dataset metadata or frame characteristics
+    frame_num = int(frame_id)
+    if frame_num < 18020:  # Example thresholds
+        return 'urban'
+    elif frame_num < 18040:
+        return 'semi-urban'
+    else:
+        return 'highway'
 
-    # 2. Dense depth accuracy
-    print("\n=== Dense Depth Accuracy ===")
-    frame_metrics = {
-        'mono': {'abs_rel': [], 'rmse': [], 'a1': []},
-        'fused': {'abs_rel': [], 'rmse': [], 'a1': []}
-    }
-    
-    # Process each frame's depth maps
-    for frame_npy in sorted(glob(os.path.join(base_dir, "debug", "*_fused_depth.npy"))):
-        frame_id = os.path.basename(frame_npy).split('_')[0]
-        depths = load_depth_data(base_dir, frame_id)
-        
-        # Use LiDAR as GT where available
-        mask = depths['lidar_mask'] & (depths['lidar'] > 0)
-        if mask.sum() < 100:
-            continue
-            
-        # Evaluate mono
-        metrics = compute_depth_metrics(depths['mono'], depths['lidar'], mask)
-        for k in frame_metrics['mono'].keys():
-            frame_metrics['mono'][k].append(metrics[k])
-            
-        # Evaluate fused
-        metrics = compute_depth_metrics(depths['fused'], depths['lidar'], mask)
-        for k in frame_metrics['fused'].keys():
-            frame_metrics['fused'][k].append(metrics[k])
-    
-    # Average dense metrics
-    dense_metrics = {
-        'Method': ['Mono', 'Fused'],
-        'Abs.Rel': [np.mean(frame_metrics['mono']['abs_rel']),
-                   np.mean(frame_metrics['fused']['abs_rel'])],
-        'RMSE (m)': [np.mean(frame_metrics['mono']['rmse']),
-                    np.mean(frame_metrics['fused']['rmse'])],
-        'δ < 1.25': [np.mean(frame_metrics['mono']['a1']),
-                    np.mean(frame_metrics['fused']['a1'])]
-    }
-    print("\nDense Depth Accuracy (vs LiDAR):")
-    print(pd.DataFrame(dense_metrics).round(3))
-
-    # 3. ECW Performance
-    print("\n=== Early Collision Warning Performance ===")
-    
-    # Get all objects for both methods
-    def compute_ecw_metrics(df):
-        """Compute precision, recall, F1 for ECW detection"""
-        # Ground truth: Objects with valid LiDAR depth
-        gt_df = df[df['lidar_median_depth'].notna()].copy()
-        gt_total = len(gt_df)
-        
-        # Consider an object as requiring ECW if LiDAR depth indicates close proximity
-        # You might want to adjust this threshold based on your requirements
-        DANGER_THRESHOLD = 33.0  # meters
-        gt_df['needs_ecw'] = gt_df['lidar_median_depth'] < DANGER_THRESHOLD
-        
-        results = {}
-        methods = {
-            'mono': 'mono_median_depth',
-            'fused': 'fused_median_depth'
-        }
-        
-        for method_name, depth_col in methods.items():
-            # For each method, evaluate its depth estimates against ground truth
-            method_mask = gt_df[depth_col].notna()
-            
-            # True positives: Method detected object AND it needed ECW
-            tp = ((method_mask) & (gt_df['needs_ecw'])).sum()
-            
-            # False positives: Method triggered ECW but object wasn't actually close
-            fp = ((method_mask) & (~gt_df['needs_ecw'])).sum()
-            
-            # False negatives: Method missed object that needed ECW
-            fn = ((~method_mask) & (gt_df['needs_ecw'])).sum()
-            
-            # Calculate metrics
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-            
-            results[method_name] = {
-                'Total Objects': gt_total,
-                'True Positives': tp,
-                'False Positives': fp,
-                'False Negatives': fn,
-                'Precision': precision,
-                'Recall': recall,
-                'F1 Score': f1
-            }
-        
-        return results
-
-    # Compute frame-level metrics for all objects
-    ecw_results = compute_ecw_metrics(obj_df)
-    
-    # Define metrics to display
-    metric_names = ['Total Objects', 'True Positives', 'False Positives', 
-                   'False Negatives', 'Precision', 'Recall', 'F1 Score']
-    
-    # Create DataFrame for display
-    metrics_display = {
-        'Metric': metric_names,
-        'Mono': [ecw_results['mono'][m] for m in metric_names],
-        'Fused': [ecw_results['fused'][m] for m in metric_names]
-    }
-    
-    print("\nECW Frame-Level Detection Performance:")
-    metrics_df = pd.DataFrame(metrics_display)
-    
-    # Convert numeric columns to strings first
-    display_df = metrics_df.copy()
-    display_df['Mono'] = display_df['Mono'].astype(str)
-    display_df['Fused'] = display_df['Fused'].astype(str)
-    
-    # Format only the percentage rows
-    percentage_metrics = ['Precision', 'Recall', 'F1 Score']
-    for col in ['Mono', 'Fused']:
-        # Convert percentages for specific rows
-        for metric in percentage_metrics:
-            idx = display_df.index[display_df['Metric'] == metric].tolist()
-            if idx:
-                val = float(display_df.loc[idx[0], col])
-                display_df.loc[idx[0], col] = f'{val:.1%}'
-    
-    print(display_df.to_string(index=False))
-
-    # 4. Event-Level ECW Analysis
-    print("\n=== Early Collision Warning (Event-Level) ===")
-
-    def class_ttc_thresh(cls_name):
-        """Conservative thresholds from literature (VRU gets more time than cars)"""
-        if cls_name is None:
-            return 3.5
-        name = str(cls_name).lower()
-        if any(k in name for k in ['person', 'ped', 'bicycle', 'bike']):
-            return 4.0
-        return 3.0  # cars, trucks, etc.
-
-    def iou(a, b):
-        """Compute IoU between two bboxes [x1,y1,x2,y2]"""
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0, ix2-ix1+1), max(0, iy2-iy1+1)
-        inter = iw * ih
-        ua = (ax2-ax1+1)*(ay2-ay1+1) + (bx2-bx1+1)*(by2-by1+1) - inter
-        return inter/ua if ua > 0 else 0.0
-
-    def assign_tracks(frame_rows, prev_tracks, frame_idx, iou_thr=0.3, max_age=5):
-        """Simple IoU tracker for frame-to-frame object association"""
-        tracks = {}
-        next_id = 0 if not prev_tracks else (max(prev_tracks.keys())+1)
-
-        # Age out old tracks
-        for tid, T in prev_tracks.items():
-            if (frame_idx - T['last_frame']) <= max_age:
-                tracks[tid] = T
-
-        # Greedy match by IoU
-        assigned = set()
-        for i, r in frame_rows.iterrows():
-            bb = eval(r['bbox']) if isinstance(r['bbox'], str) else r['bbox']
-            best_iou, best_id = 0.0, None
-            for tid, T in tracks.items():
-                cur_iou = iou(T['bbox'], bb)
-                if cur_iou > best_iou:
-                    best_iou, best_id = cur_iou, tid
-            if best_iou >= iou_thr and best_id is not None and best_id not in assigned:
-                T = tracks[best_id]
-                T['bbox'] = bb
-                T['class'] = r['class']
-                T['last_frame'] = frame_idx
-                assigned.add(best_id)
-            else:
-                # New track
-                tracks[next_id] = {
-                    'bbox': bb, 'class': r['class'], 'last_frame': frame_idx,
-                    'warn_frames': [], 'hazard_frames': []
-                }
-                assigned.add(next_id)
-                next_id += 1
-        return tracks
-
-    def is_finite(x):
-        """Safe check for finite float values"""
+def safe_bbox(x):
+    if isinstance(x, (list, tuple)):
+        return [int(v) for v in x]
+    if isinstance(x, str):
         try:
-            return np.isfinite(float(x))
-        except:
-            return False
+            t = ast.literal_eval(x)
+            return [int(v) for v in t]
+        except Exception:
+            return None
+    return None
 
-    def compute_warn_and_hazard_flags(row, method='fused'):
-        """Compute warning and hazard flags for a single object"""
-        ttc = row.get('ttc', np.nan)
-        cls_name = row.get('class', None)
-        in_bubble = bool(row.get('in_ecw', False))
-        T_warn = class_ttc_thresh(cls_name)
+def class_ttc_thresh(cls_name):
+    """Match your pipeline thresholds: 2.0s VRU, 1.0s vehicles, 1.5s default."""
+    if cls_name is None:
+        return 1.5
+    name = str(cls_name).lower()
+    vru_tokens = ['person', 'ped', 'pedestrian', 'bicycle', 'bike', 'cyclist', 'motorcycle', 'rider', 'vru']
+    if any(k in name for k in vru_tokens):
+        return 2.0
+    return 1.0
 
-        # Warning based on chosen method's TTC
-        warn = in_bubble and is_finite(ttc) and (ttc <= T_warn)
+def create_qualitative_visualization(frame_data, output_path, scenario_type):
+    """Create qualitative visualization for a specific scenario."""
+    fig = plt.figure(figsize=(15, 10))
+    
+    # RGB with boxes and ECW
+    ax1 = plt.subplot(221)
+    ax1.imshow(frame_data['rgb'])
+    if 'boxes' in frame_data:
+        for box, warn in zip(frame_data['boxes'], frame_data['warnings']):
+            color = 'r' if warn else 'g'
+            rect = plt.Rectangle((box[0], box[1]), box[2]-box[0], box[3]-box[1],
+                               fill=False, color=color, linewidth=2)
+            ax1.add_patch(rect)
+    ax1.set_title('RGB with Detection & Warnings')
+    
+    # Monocular depth
+    ax2 = plt.subplot(222)
+    mono_depth = plt.imshow(frame_data['mono_depth'], cmap='magma')
+    plt.colorbar(mono_depth, ax=ax2)
+    ax2.set_title('Monocular-Only Depth')
+    
+    # LiDAR overlay
+    ax3 = plt.subplot(223)
+    ax3.imshow(frame_data['rgb'])  # Base RGB image
+    lidar_scatter = ax3.scatter(frame_data['lidar_points'][:, 0], 
+                              frame_data['lidar_points'][:, 1],
+                              c=frame_data['lidar_points'][:, 2],
+                              cmap='magma', alpha=0.5)
+    plt.colorbar(lidar_scatter, ax=ax3)
+    ax3.set_title('LiDAR Points Overlay')
+    
+    # Fused depth
+    ax4 = plt.subplot(224)
+    fused_depth = plt.imshow(frame_data['fused_depth'], cmap='magma')
+    plt.colorbar(fused_depth, ax=ax4)
+    ax4.set_title('Fused Depth')
+    
+    plt.suptitle(f'Scenario: {scenario_type}')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
 
-        # Hazard based on LiDAR TTC or depth
-        hazard = False
-        if is_finite(row.get('lidar_median_depth', np.nan)):
-            v_ego = 5.0  # m/s (could load from timing.csv)
-            d = float(row['lidar_median_depth'])
-            ttc_lidar = d / max(v_ego, 1e-3)
-            hazard = in_bubble and (ttc_lidar <= T_warn)
-        
-        return warn, hazard, T_warn
-    def build_events(df, method='fused'):
-        """Build warning events from frame-wise object data"""
-        rows = df[df['in_ecw'] & df['meets_size'] & (df['depth_valid_px'] >= 50)].copy()
-        rows.sort_values(['obj_id', 'frame'], inplace=True)
-        events = []
-        
-        for oid, g in rows.groupby('obj_id'):
-            active = False
-            start = None
-            last_bbox = None
-            warn_col = f'warn_stable_{method}'
-            
-            for _, r in g.iterrows():
-                if r[warn_col] and not active:
-                    active = True
-                    start = int(r['frame'])
-                if r[warn_col]:
-                    last_bbox = r['bbox']
-                if active and not r[warn_col]:
-                    end = int(r['frame'])
-                    events.append({
-                        'obj_id': oid, 
-                        'start': start, 
-                        'end': end, 
-                        'bbox': last_bbox
-                    })
-                    active = False
-            if active:
-                events.append({
-                    'obj_id': oid, 
-                    'start': start, 
-                    'end': int(g['frame'].iloc[-1]), 
-                    'bbox': last_bbox
-                })
-        return events
+def create_timeline_strip(data, output_path):
+    """Create timeline visualization showing TTC, warnings, and trigger moment."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), height_ratios=[2, 1])
+    
+    # TTC curve
+    ax1.plot(data['time'], data['ttc'], 'b-', label='TTC')
+    ax1.axhline(y=data['ttc_threshold'], color='r', linestyle='--', label='Warning Threshold')
+    if 't_star' in data:
+        ax1.axvline(x=data['t_star'], color='g', linestyle='--', label='t*')
+    ax1.set_ylabel('TTC (s)')
+    ax1.grid(True)
+    ax1.legend()
+    
+    # Warning state
+    ax2.fill_between(data['time'], 0, data['warning_state'], 
+                     color='r', alpha=0.3, label='Warning Active')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Warning\nState')
+    ax2.set_yticks([0, 1])
+    ax2.set_yticklabels(['Off', 'On'])
+    
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
 
-    def match_events(pred_events, gt_events, iou_threshold=0.3):
-        """Match predicted events to ground truth events"""
-        TP = FP = FN = 0
-        matched_pairs = []
+def compute_depth_metrics_with_ci(pred, gt, valid_mask=None, n_bootstrap=1000):
+    """Compute depth metrics with bootstrap confidence intervals."""
+    if valid_mask is None:
+        valid_mask = np.ones(len(pred), dtype=bool)
         
-        for pe in pred_events:
-            best_match = None
-            best_overlap = 0
+    pred = pred[valid_mask]
+    gt = gt[valid_mask]
+    
+    if len(pred) < 100:
+        return {
+            'abs_rel': np.nan,
+            'abs_rel_mean': np.nan,
+            'abs_rel_ci': (np.nan, np.nan),
+            'rmse': np.nan,
+            'rmse_mean': np.nan,
+            'rmse_ci': (np.nan, np.nan)
+        }
+    
+    try:
+        # Compute base metrics
+        abs_rel = float(np.mean(np.abs(pred - gt) / np.maximum(gt, EPS)))
+        rmse = float(np.sqrt(np.mean((pred - gt) ** 2)))
+        
+        # Bootstrap sampling for confidence intervals
+        bootstrap_abs_rel = []
+        bootstrap_rmse = []
+        
+        for _ in range(n_bootstrap):
+            indices = np.random.choice(len(pred), len(pred), replace=True)
+            p_sample = pred[indices]
+            g_sample = gt[indices]
             
-            for ge in gt_events:
-                # Check temporal overlap
-                t_overlap = min(pe['end'], ge['end']) - max(pe['start'], ge['start'])
-                if t_overlap <= 0:
-                    continue
-                    
-                # Check spatial overlap (IoU) during overlap period
-                if iou(pe['bbox'], ge['bbox']) >= iou_threshold:
-                    overlap = t_overlap
-                    if overlap > best_overlap:
-                        best_overlap = overlap
-                        best_match = ge
+            # Compute metrics for this sample
+            abs_rel_sample = np.mean(np.abs(p_sample - g_sample) / np.maximum(g_sample, EPS))
+            rmse_sample = np.sqrt(np.mean((p_sample - g_sample) ** 2))
             
-            if best_match is not None:
-                TP += 1
-                matched_pairs.append((pe, best_match))
-                gt_events.remove(best_match)
-            else:
-                FP += 1
-                
-        FN = len(gt_events)  # Remaining unmatched GT events
-        return TP, FP, FN, matched_pairs
-
-    def evaluate_ecw(obj_df, method_name='fused'):
-        """Evaluate ECW performance with object-centric metrics"""
-        fps = 25.0  # Camera FPS
+            bootstrap_abs_rel.append(abs_rel_sample)
+            bootstrap_rmse.append(rmse_sample)
         
-        # Initialize tracking state
-        prev_tracks = {}
-        global frame_idx
+        # Compute statistics
+        abs_rel_mean = np.mean(bootstrap_abs_rel)
+        rmse_mean = np.mean(bootstrap_rmse)
         
-        # Verify required columns exist
-        required_cols = ['frame', 'obj_id', 'ttc', 'in_ecw', 'meets_size', 
-                        'depth_valid_px', 'bbox', 'source', 'class']
-        missing_cols = [col for col in required_cols if col not in obj_df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")  # Used in assign_tracks
-        
-        # Set warning flags based on TTC and bubble
-        warn_threshold = 3.5  # Default threshold in seconds
-        valid_mask = (
-            obj_df['in_ecw'] &      # Object is in warning zone
-            obj_df['meets_size'] &   # Object meets size criteria
-            (obj_df['depth_valid_px'] >= 50) & # Has enough valid depth pixels
-            obj_df['ttc'].notna()    # Has valid TTC estimate
-        )
-        
-        # Initialize warning columns
-        obj_df[f'warn_raw_{method_name}'] = False
-        obj_df[f'warn_stable_{method_name}'] = False
-        
-        # Set warnings where TTC is below threshold
-        obj_df.loc[valid_mask, f'warn_raw_{method_name}'] = obj_df.loc[valid_mask, 'ttc'] <= warn_threshold
-        obj_df.loc[valid_mask, f'warn_stable_{method_name}'] = obj_df.loc[valid_mask, 'ttc'] <= warn_threshold
-        
-        # Filter for valid objects
-        valid_mask = (
-            obj_df['in_ecw'] &     # Object is in warning zone
-            obj_df['meets_size'] &     # Object meets size criteria
-            (obj_df['depth_valid_px'] >= 50) & # Has enough valid depth pixels
-            obj_df['ttc'].notna()      # Has valid TTC estimate
-        )
-        df = obj_df[valid_mask].copy()
-        
-        # Add tracking IDs if not present
-        if 'obj_id' not in df.columns:
-            df['obj_id'] = [f"{method_name}_{i}" for i in range(len(df))]
-        
-        # Process each frame to build event tracks
-        events = []
-        for frame_idx, frame_data in df.groupby('frame'):
-            # Create tracks dictionary if it doesn't exist
-            if not prev_tracks:
-                prev_tracks = {}
-                
-            # Process current frame
-            tracks = assign_tracks(frame_data, prev_tracks, frame_idx)
-            prev_tracks = tracks.copy()  # Update for next iteration
-            
-            # Update warning states for active tracks
-            for tid, track in tracks.items():
-                if frame_data[f'warn_stable_{method_name}'].any():
-                    track.setdefault('warn_frames', []).append(frame_idx)
-                if frame_data[f'warn_raw_{method_name}'].any():
-                    track.setdefault('hazard_frames', []).append(frame_idx)
-                    
-        # Convert tracks to events
-        for tid, track in prev_tracks.items():
-            if 'warn_frames' in track and track['warn_frames']:
-                warn_frames = sorted(track['warn_frames'])
-                hazard_frames = sorted(track.get('hazard_frames', []))
-                
-                # Create events from warning tracks that have hazards
-            if hazard_frames and warn_frames:
-                # Get hazard frames that happen during or after warning 
-                warn_start = min(warn_frames)
-                warn_end = max(warn_frames)
-                valid_hazards = [h for h in hazard_frames if h >= warn_start]
-                
-                if valid_hazards:
-                    events.append({
-                        'obj_id': tid,
-                        'start': warn_start,
-                        'end': warn_end, 
-                        'hazard_start': min(valid_hazards),  # First hazard after warning
-                        'bbox': track['bbox'],
-                        'class': track['class']
-                    })
-        
-        # Process events and compute metrics
-        TP = FP = FN = 0
-        lead_times = []
-        
-        # Convert to ground truth events using LiDAR-based hazards
-        gt_events = []
-        for e in events:
-            if e.get('hazard_start') is not None:
-                gt_events.append(e)
-                
-        # Match predicted warnings to ground truth hazards
-        matched_gt = set()
-        for pred in events:
-            best_match = None
-            best_iou = 0.0
-            
-            for gt in gt_events:
-                # Check temporal overlap and ordering
-                if gt['hazard_start'] >= pred['start'] and gt['hazard_start'] <= pred['end']:
-                    # Check spatial overlap using IoU
-                    if iou(pred['bbox'], gt['bbox']) >= 0.3:
-                        # Compute lead time (warning before hazard)
-                        lead_time = (gt['hazard_start'] - pred['start']) / fps
-                        # Prefer matches with longer lead time
-                        if lead_time > best_iou:
-                            best_iou = lead_time
-                            best_match = gt
-                            
-            if best_match is not None:
-                TP += 1
-                matched_gt.add(best_match['obj_id'])
-                if best_iou > 0:  # Only count positive lead times
-                    lead_times.append(best_iou)
-            else:
-                FP += 1
-                
-        # Count unmatched ground truth events as false negatives
-        FN = len(gt_events) - len(matched_gt)
-        
-        # Calculate final metrics
-        total_frames = len(df['frame'].unique())
-        minutes = total_frames / (fps * 60)
-        
-        precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
-        recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        abs_rel_ci = np.percentile(bootstrap_abs_rel, [2.5, 97.5])
+        rmse_ci = np.percentile(bootstrap_rmse, [2.5, 97.5])
         
         return {
-            'Total Events': TP + FN,
-            'True Positives': TP,
-            'False Positives': FP,
-            'False Negatives': FN,
-            'Precision': precision,
-            'Recall': recall,
-            'F1 Score': f1,
-            'Lead Time (mean)': float(np.mean(lead_times)) if lead_times else np.nan,
-            'Lead Time (median)': float(np.median(lead_times)) if lead_times else np.nan,
-            'False Alarms/min': FP / minutes if minutes > 0 else np.nan
+            'abs_rel': abs_rel,
+            'abs_rel_mean': abs_rel_mean,
+            'abs_rel_ci': tuple(abs_rel_ci),
+            'rmse': rmse,
+            'rmse_mean': rmse_mean,
+            'rmse_ci': tuple(rmse_ci)
         }
-    # Evaluate both mono and fused ECW performance at event level
-    ecw_mono_event = evaluate_ecw(obj_df, method_name='mono')
-    ecw_fused_event = evaluate_ecw(obj_df, method_name='fused')
+    except Exception as e:
+        print(f"Error in bootstrap computation: {str(e)}")
+        return {
+            'abs_rel': np.nan,
+            'abs_rel_mean': np.nan,
+            'abs_rel_ci': (np.nan, np.nan),
+            'rmse': np.nan,
+            'rmse_mean': np.nan,
+            'rmse_ci': (np.nan, np.nan)
+        }
 
-    # Create results table
-    results_df = pd.DataFrame([ecw_mono_event, ecw_fused_event], index=['Mono', 'Fused'])
-    
-    # Format percentage metrics
-    percentage_cols = ['Precision', 'Recall', 'F1 Score']
-    for col in percentage_cols:
-        results_df[col] = results_df[col].apply(lambda x: f'{x:.1%}')
-    
-    # Format time metrics
-    time_cols = ['Lead Time (mean)', 'Lead Time (median)']
-    for col in time_cols:
-        results_df[col] = results_df[col].apply(lambda x: f'{x:.2f}s' if np.isfinite(x) else 'N/A')
-    
-    # Format rate metrics
-    results_df['False Alarms/min'] = results_df['False Alarms/min'].apply(lambda x: f'{x:.2f}')
-    
-    print("\nECW Event-Level Performance:")
-    print(results_df.round(3))
+        ratio = p / np.clip(g, EPS, None)
+        a1 = np.mean((ratio > 1/1.25) & (ratio < 1.25))
+        a2 = np.mean((ratio > 1/2.0) & (ratio < 2.0))
+        abs_rel = np.mean(np.abs(p - g) / np.clip(g, EPS, None))
+        sq_rel  = np.mean(((p - g) ** 2) / np.clip(g, EPS, None))
+        rmse    = np.sqrt(np.mean((p - g) ** 2))
+        rmse_log= np.sqrt(np.mean((np.log(p) - np.log(g)) ** 2))
+        return dict(abs_rel=abs_rel, sq_rel=sq_rel, rmse=rmse, rmse_log=rmse_log, a1=a1, a2=a2)
 
-    # 4. Timing Performance
-    print("\n=== Pipeline Timing ===")
-    timing_df = pd.read_csv(os.path.join(base_dir, 'timing.csv'))
-    # Calculate means of only numeric columns
-    numeric_cols = ['t_det_ms', 't_depth_ms', 't_fuse_ms', 't_ecw_ms', 't_total_ms']
-    timing_means = timing_df[numeric_cols].mean()
+def load_depth_data(base_dir, frame_id):
+    base = os.path.join(base_dir, "debug", f"{frame_id}")
+    return {
+        'fused': np.load(f"{base}_fused_depth.npy"),
+        'mono':  np.load(f"{base}_mono_depth.npy"),
+        'lidar': np.load(f"{base}_lidar_depth.npy"),
+        'lidar_mask': np.load(f"{base}_lidar_mask.npy").astype(bool)
+    }
+
+def iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1 + 1), max(0, iy2 - iy1 + 1)
+    inter = iw * ih
+    ua = (ax2 - ax1 + 1) * (ay2 - ay1 + 1) + (bx2 - bx1 + 1) * (by2 - by1 + 1) - inter
+    return inter / ua if ua > 0 else 0.0
+
+# -------------------------------
+# ECW evaluation helpers
+# -------------------------------
+
+def compute_per_method_ttc(df_subset, depth_col, fps=25.0, window_size=5):
+    """
+    Compute method-specific TTC with temporal smoothing and robustness checks.
+    """
+    df_subset = df_subset.sort_values(['obj_id', 'frame'])
+    out = pd.Series(np.nan, index=df_subset.index, dtype=float)
     
-    backend_name = timing_df['backend'].iloc[0]  # Get the backend name from first row
+    for oid, g in df_subset.groupby('obj_id', sort=False):
+        d = g[depth_col].astype(float).values
+        if np.isfinite(d).sum() < window_size:
+            continue
+            
+        # Smooth depth measurements with rolling median
+        d_smooth = pd.Series(d).rolling(window_size, center=True, min_periods=3).median().values
+        
+        # Compute velocity with central difference
+        dzdt = np.zeros_like(d_smooth)
+        dzdt[1:-1] = (d_smooth[2:] - d_smooth[:-2]) * (fps/2)  # Central difference
+        
+        # Compute TTC with additional checks
+        ttc_seq = np.full_like(d_smooth, np.inf, dtype=float)
+        for k in range(window_size//2, len(d_smooth)-window_size//2):
+            if np.isfinite(d_smooth[k]) and np.abs(dzdt[k]) > EPS:
+                # Only compute TTC for approaching objects
+                if dzdt[k] < -EPS:  
+                    ttc = d_smooth[k] / (-dzdt[k])
+                    # Sanity check on TTC value
+                    if 0 < ttc < 20.0:  # Reasonable TTC range
+                        ttc_seq[k] = ttc
+                        
+        # Apply EMA smoothing to TTC sequence
+        ttc_smooth = pd.Series(ttc_seq).ewm(alpha=0.3).mean().values
+        out.loc[g.index] = ttc_smooth
+        
+    return out
+
+def apply_persistence_hysteresis(ttc_series, cls_series, min_frames=3, hysteresis=0.5):
+    """
+    Trigger when TTC <= T_warn for >= min_frames consecutive frames.
+    Clear only when TTC > T_warn + hysteresis.
+    """
+    warn_raw = []
+    warn_stable = []
+    state_active = False
+    consec = 0
+    for ttc, cls_name in zip(ttc_series, cls_series):
+        T = class_ttc_thresh(cls_name)
+        wr = (np.isfinite(ttc) and (ttc <= T))
+        warn_raw.append(bool(wr))
+        consec = consec + 1 if wr else 0
+        if (not state_active) and (consec >= min_frames):
+            state_active = True
+        if state_active and np.isfinite(ttc) and (ttc > T + hysteresis):
+            state_active = False
+            consec = 0
+        warn_stable.append(state_active)
+    return pd.Series(warn_raw, index=ttc_series.index), pd.Series(warn_stable, index=ttc_series.index)
+
+def build_events_from_labels(df, label_col):
+    """
+    Build events as contiguous runs of True in label_col per obj_id.
+    Represent each event by (start_frame, end_frame, last_bbox).
+    """
+    events = []
+    df = df.sort_values(['obj_id','frame'])
+    for oid, g in df.groupby('obj_id', sort=False):
+        active = False
+        start = None
+        last_bb = None
+        for _, r in g.iterrows():
+            lb = bool(r[label_col])
+            bb = safe_bbox(r['bbox'])
+            if lb and not active:
+                active = True
+                start = int(r['frame'])
+            if lb:
+                last_bb = bb
+            if active and not lb:
+                end = int(r['frame'])
+                if last_bb is not None:
+                    events.append(dict(obj_id=oid, start=start, end=end, bbox=last_bb))
+                active = False
+        if active and last_bb is not None:
+            events.append(dict(obj_id=oid, start=start, end=int(g['frame'].iloc[-1]), bbox=last_bb))
+    return events
+
+def match_events(pred_events, gt_events, fps=25.0, iou_thr=0.3, class_type=None):
+    """
+    Match predicted events to ground truth with class-specific handling.
+    Args:
+        pred_events: List of predicted events
+        gt_events: List of ground truth events
+        fps: Frames per second for time conversion
+        iou_thr: IoU threshold for spatial matching
+        class_type: Optional class filter ('vru' or 'vehicle')
+    """
+    TP = FP = FN = 0
+    lead_times = []
+    gt_used = [False] * len(gt_events)
     
-    timing_metrics = {
-        'Component': ['Detection', 'Depth', 'Fusion', 'ECW', 'Total'],
-        'Time (ms)': [
-            timing_means['t_det_ms'],
-            timing_means['t_depth_ms'],
-            timing_means['t_fuse_ms'],
-            timing_means['t_ecw_ms'],
-            timing_means['t_total_ms']
-        ],
-        'FPS': [
-            1000/timing_means['t_det_ms'],
-            1000/timing_means['t_depth_ms'],
-            1000/timing_means['t_fuse_ms'],
-            1000/timing_means['t_ecw_ms'],
-            1000/timing_means['t_total_ms']
-        ]
+    # Class filtering
+    if class_type:
+        vru_tokens = ['person', 'ped', 'pedestrian', 'bicycle', 'bike', 'cyclist', 'motorcycle', 'rider', 'vru']
+        is_vru = class_type.lower() == 'vru'
+        
+        def matches_class(event):
+            cls = event.get('class', '').lower()
+            return any(k in cls for k in vru_tokens) if is_vru else not any(k in cls for k in vru_tokens)
+            
+        pred_events = [e for e in pred_events if matches_class(e)]
+        gt_events = [e for e in gt_events if matches_class(e)]
+    
+    # Event matching with temporal and spatial constraints
+    for pe in pred_events:
+        best = -1
+        best_lt = -np.inf
+        for j, ge in enumerate(gt_events):
+            if gt_used[j]:
+                continue
+                
+            # Temporal matching
+            if ge['start'] < pe['start'] - fps*2.0 or ge['start'] > pe['end']:  # Allow up to 2s early warning
+                continue
+                
+            # Spatial matching
+            if pe['bbox'] is None or ge['bbox'] is None:
+                continue
+            if iou(pe['bbox'], ge['bbox']) < iou_thr:
+                continue
+                
+            # Compute lead time
+            lt = (ge['start'] - pe['start']) / fps
+            if lt > best_lt:
+                best_lt = lt
+                best = j
+        
+        if best >= 0:
+            TP += 1
+            gt_used[best] = True
+            if 0 < best_lt < 5.0:  # Valid lead time range
+                lead_times.append(best_lt)
+        else:
+            FP += 1
+    
+    FN = gt_used.count(False)
+    
+    # Additional metrics
+    lead_time_stats = {
+        'mean': np.mean(lead_times) if lead_times else np.nan,
+        'median': np.median(lead_times) if lead_times else np.nan,
+        'p10': np.percentile(lead_times, 10) if len(lead_times) > 5 else np.nan
     }
     
-    print(f"\nTiming Results (using {backend_name} backend):")
-    print("\nComponent-wise Timing:")
-    print(pd.DataFrame(timing_metrics).round(2))
+    return TP, FP, FN, lead_times
+
+# -------------------------------
+# Main comparison
+# -------------------------------
+
+def compare_depth_methods(base_dir):
+    # Import required libraries
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from glob import glob
+    from tqdm import tqdm
+    plt.switch_backend('Agg')  # Use non-interactive backend
+    # --- Setup visualization environment ---
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import matplotlib.gridspec as gridspec
+    
+    # Set publication-quality style
+    plt.style.use('seaborn-v0_8-paper')  # Updated style name for newer versions
+    # Additional customization for publication quality
+    plt.rcParams['figure.dpi'] = 300
+    plt.rcParams['savefig.dpi'] = 300
+    plt.rcParams['font.size'] = 10
+    plt.rcParams['legend.fontsize'] = 8
+    plt.rcParams['figure.titlesize'] = 12
+    plt.rcParams['axes.grid'] = True
+    plt.rcParams['grid.alpha'] = 0.3
+    plt.rcParams['axes.axisbelow'] = True  # Place grid behind plots
+    
+    # Create output directory for plots and metrics
+    output_dir = os.path.join(os.path.dirname(__file__), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    def create_depth_comparison_plot(df, metric_name, ylabel, filename):
+        """Create publication-quality depth comparison plot"""
+        plt.figure(figsize=(8, 5))
+        
+        # Create grouped bar plot
+        ax = sns.barplot(data=df[df['Range'] != '>50m'], 
+                        x='Range', y=metric_name, hue='Method',
+                        palette=['lightcoral', 'forestgreen'])
+        
+        # Customize appearance
+        plt.title(f'{metric_name} by Range', pad=15)
+        plt.xlabel('Range', labelpad=10)
+        plt.ylabel(ylabel, labelpad=10)
+        
+        # Add value labels on bars
+        for container in ax.containers:
+            ax.bar_label(container, fmt='%.3f', padding=3)
+        
+        # Customize legend
+        plt.legend(title='Method', bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        # Adjust layout and save
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, filename), 
+                   bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+        
+    def create_ttc_stability_plot(cv_df):
+        """Create TTC stability visualization"""
+        plt.figure(figsize=(8, 5))
+        
+        # Create line plot with markers
+        sns.lineplot(data=cv_df, x='Range', y='CV', hue='Method', 
+                    marker='o', markersize=8, linewidth=2,
+                    palette=['lightcoral', 'forestgreen'])
+        
+        # Customize appearance
+        plt.title('TTC Stability by Range', pad=15)
+        plt.xlabel('Range', labelpad=10)
+        plt.ylabel('Coefficient of Variation', labelpad=10)
+        
+        # Add value labels
+        for method in cv_df['Method'].unique():
+            method_data = cv_df[cv_df['Method'] == method]
+            for x, y in zip(method_data['Range'], method_data['CV']):
+                plt.annotate(f'{y:.3f}', (x, y), 
+                           xytext=(0, 5), textcoords='offset points',
+                           ha='center', va='bottom')
+        
+        plt.legend(title='Method', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'ttc_stability.png'),
+                   bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+        
+    def create_leadtime_distribution_plot(lead_times_dict):
+        """Create lead time distribution visualization"""
+        plt.figure(figsize=(8, 5))
+        
+        colors = {'Mono': 'lightcoral', 'Fused': 'forestgreen'}
+        for method, times in lead_times_dict.items():
+            if times:
+                sns.kdeplot(data=times, label=method, color=colors[method])
+                plt.axvline(np.median(times), color=colors[method], 
+                          linestyle='--', alpha=0.5)
+                
+        plt.title('Lead Time Distribution', pad=15)
+        plt.xlabel('Lead Time (seconds)', labelpad=10)
+        plt.ylabel('Density', labelpad=10)
+        plt.legend(title='Method')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'leadtime_distribution.png'),
+                   bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+        
+    def create_summary_dashboard(depth_df, ttc_df, ecw_df):
+        """Create comprehensive results dashboard"""
+        try:
+            plt.figure(figsize=(15, 10))
+            gs = gridspec.GridSpec(2, 2)
+            
+            # Convert AbsRel values from string to float if needed
+            def extract_float(x):
+                if isinstance(x, str) and '±' in x:
+                    return float(x.split('±')[0].strip())
+                return float(x) if pd.notnull(x) else np.nan
+            
+            # Prepare depth data
+            plot_depth_df = depth_df.copy()
+            if 'AbsRel' in plot_depth_df.columns:
+                plot_depth_df['AbsRel'] = plot_depth_df['AbsRel'].apply(extract_float)
+            
+            # Depth metrics
+            ax1 = plt.subplot(gs[0, 0])
+            subset = plot_depth_df[plot_depth_df['Range'] != '>50m'].copy()
+            sns.barplot(data=subset,
+                       x=subset['Range'].astype('category'),
+                       y='AbsRel', 
+                       hue='Method', 
+                       ax=ax1)
+            ax1.set_title('Depth Error by Range')
+            
+            # TTC stability
+            if ttc_df is not None:
+                ax2 = plt.subplot(gs[0, 1])
+                sns.lineplot(data=ttc_df, 
+                           x=ttc_df['Range'].astype('category'),
+                           y='CV',
+                           hue='Method', 
+                           marker='o', 
+                           ax=ax2)
+                ax2.set_title('TTC Stability')
+            
+            # ECW metrics
+            if ecw_df is not None:
+                ax3 = plt.subplot(gs[1, :])
+                ecw_plot_data = ecw_df.melt(id_vars=['Method'],
+                                          value_vars=['Precision', 'Recall', 'F1'])
+                # Convert percentage strings to float values
+                ecw_plot_data['value'] = ecw_plot_data['value'].apply(
+                    lambda x: float(str(x).replace('%', '')) if isinstance(x, str) else float(x))
+                sns.barplot(data=ecw_plot_data, 
+                          x='Method', 
+                          y='value',
+                          hue='variable', 
+                          ax=ax3)
+                ax3.set_title('ECW Performance Metrics')
+                ax3.set_ylabel('Score')
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'results_dashboard.png'),
+                       bbox_inches='tight', pad_inches=0.1)
+            plt.close()
+        except Exception as e:
+            print(f"Warning: Could not create summary dashboard: {str(e)}")
+    
+    # Initialize tracking variables
+    results = []  # Will be populated with box-level metrics
+    dense_results = []  # Will be populated with dense metrics
+    ev_f = None  # Will store fused event metrics
+    
+    # --- Plot: Box-Level Depth Error (Bar plot by range) ---
+    box_df = pd.DataFrame(results)
+    if not box_df.empty:
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=box_df, x='Range', y='MAE (m)', hue='Method')
+        plt.title('Box-Level MAE by Range')
+        plt.ylabel('MAE (m)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'box_mae_by_range.png'))
+        plt.close()
+
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=box_df, x='Range', y='RMSE (m)', hue='Method')
+        plt.title('Box-Level RMSE by Range')
+        plt.ylabel('RMSE (m)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'box_rmse_by_range.png'))
+        plt.close()
+    
+    # --- Plot: Dense Depth Accuracy (Bar plot by range) ---
+    dense_df = pd.DataFrame(dense_results)
+    if not dense_df.empty:
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
+        plt.title('Dense AbsRel by Range')
+        plt.ylabel('AbsRel')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
+        plt.close()
+
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
+        plt.title('Dense RMSE by Range')
+        plt.ylabel('RMSE (m)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
+        plt.close()
+        # --- Plot: ECW Event-Level Metrics (Bar plot) ---
+        if 'ev' in locals():
+            ev_plot = ev.reset_index()[['index','Precision','Recall','F1']].melt(id_vars='index', var_name='Metric', value_name='Value')
+            ev_plot['Value'] = ev_plot['Value'].str.replace('%','').astype(float)
+            plt.figure(figsize=(6,5))
+            sns.barplot(data=ev_plot, x='Metric', y='Value', hue='index')
+            plt.title('ECW Event-Level Metrics (Mono vs Fused)')
+            plt.ylabel('Score (%)')
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'ecw_event_metrics.png'))
+            plt.close()
+    # --- Plot: Lead-Time Histogram (Fused) ---
+    lead_times = ev_f['LeadTime_mean'] if ev_f is not None else None
+    if isinstance(lead_times, str):
+        try:
+            lead_times = float(lead_times.replace('s',''))
+        except:
+            lead_times = None
+    if lead_times is not None:
+        # If you have per-event lead times, plot histogram
+        # Here, just plot a dummy value if available
+        plt.figure(figsize=(6,4))
+        plt.hist([lead_times], bins=10, color='royalblue', alpha=0.7)
+        plt.title('Lead-Time Histogram (Fused)')
+        plt.xlabel('Lead Time (s)')
+        plt.ylabel('Count')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'lead_time_histogram.png'))
+        plt.close()
+    # --- TTC Stability Analysis ---
+    def compute_ttc_stability(ttc_series, pre_trigger_window=30):
+        """Compute CV(TTC) over pre-trigger window"""
+        if len(ttc_series) < pre_trigger_window:
+            return np.nan
+        
+        # Use only finite, reasonable TTC values
+        valid_ttc = ttc_series[(ttc_series > 0) & (ttc_series < 20)]
+        if len(valid_ttc) < pre_trigger_window//2:
+            return np.nan
+            
+        # Compute CV using rolling window
+        std = valid_ttc.rolling(pre_trigger_window, min_periods=pre_trigger_window//2).std()
+        mean = valid_ttc.rolling(pre_trigger_window, min_periods=pre_trigger_window//2).mean()
+        cv = (std / (mean + EPS)).mean()
+        return float(cv)
+    
+    # Compute TTC stability by range and method
+    cv_by_range = []
+    if 'df' in locals():
+        for method in ['mono', 'fused']:
+            for rb in ['0-10m', '10-25m', '25-50m']:
+                mask = ((df['range_bin'] == rb) & 
+                       (df[f'ttc_{method}'] > 0) & 
+                       (df[f'ttc_{method}'] < 20))
+                
+                if mask.sum() > 30:
+                    ttc_series = pd.Series(df.loc[mask, f'ttc_{method}'].astype(float))
+                    cv = compute_ttc_stability(ttc_series)
+                    if np.isfinite(cv):
+                        cv_by_range.append({
+                            'Method': method.capitalize(),
+                            'Range': rb,
+                            'CV': cv,
+                            'N': mask.sum()
+                        })
+    if cv_by_range:
+        cv_df = pd.DataFrame(cv_by_range)
+        plt.figure(figsize=(7,4))
+        sns.lineplot(data=cv_df, x='Range', y='CV', marker='o')
+        plt.title('TTC Stability (CV) by Range')
+        plt.ylabel('CV (Coefficient of Variation)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'ttc_cv_by_range.png'))
+        plt.close()
+
+    # 1) Box-level depth (LiDAR as GT) with stratification and LiDAR-only baseline
+    print("\n=== Box-Level Depth Accuracy (Stratified) ===")
+    obj_path = os.path.join(base_dir, 'object_depth_metrics.csv')
+    obj_df = pd.read_csv(obj_path)
+
+    det_df = obj_df[obj_df['source'] == 'det'].copy()
+    ld = det_df['lidar_median_depth'].astype(float).to_numpy()
+    mask_lidar = np.isfinite(ld) & (ld > EPS)
+    mono = det_df['mono_median_depth'].astype(float).to_numpy()
+    fused = det_df['fused_median_depth'].astype(float).to_numpy()
+
+    # Compare Mono and Fused depths against LiDAR ground truth
+    mono_err  = np.abs(mono[mask_lidar] - ld[mask_lidar])
+    fused_err = np.abs(fused[mask_lidar] - ld[mask_lidar])
+
+    # Range bins
+    def range_bin(d):
+        if pd.isna(d): return 'nan'
+        if d <= 10: return '0-10m'
+        if d <= 25: return '10-25m'
+        if d <= 50: return '25-50m'
+        return '>50m'
+    det_df['range_bin'] = det_df['lidar_median_depth'].apply(range_bin)
+
+    # Stratified metrics (comparing only Mono and Fused against LiDAR ground truth)
+    methods = ['Mono','Fused']  # Removed LiDAR since it's our ground truth
+    metrics = ['MAE (m)','RMSE (m)']
+    results = []
+    for rb in ['0-10m','10-25m','25-50m','>50m']:
+        mask = mask_lidar & (det_df['range_bin'] == rb).to_numpy()
+        vals = {
+            'Mono': mono[mask],
+            'Fused': fused[mask]
+        }
+        gt = ld[mask]
+        for m in methods:
+            err = np.abs(vals[m] - gt)
+            mae = float(err.mean()) if err.size else np.nan
+            rmse = float(np.sqrt((err**2).mean())) if err.size else np.nan
+            results.append({'Method': m, 'Range': rb, 'MAE (m)': mae, 'RMSE (m)': rmse, 'N': int(err.size)})
+    
+    # Create box-level plots right after computing the metrics
+    box_df = pd.DataFrame(results)
+    plt.figure(figsize=(8,5))
+    sns.barplot(data=box_df, x='Range', y='MAE (m)', hue='Method')
+    plt.title('Box-Level MAE by Range')
+    plt.ylabel('MAE (m)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'box_mae_by_range.png'))
+    plt.close()
+
+    plt.figure(figsize=(8,5))
+    sns.barplot(data=box_df, x='Range', y='RMSE (m)', hue='Method')
+    plt.title('Box-Level RMSE by Range')
+    plt.ylabel('RMSE (m)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'box_rmse_by_range.png'))
+    plt.close()
+
+    print("\nBox-Level Depth Error (vs LiDAR, stratified):")
+    results_df = pd.DataFrame(results).round(3)
+    print(results_df)
+    
+    # Create visualization for box-level metrics
+    create_depth_comparison_plot(results_df, 'MAE (m)', 'Mean Absolute Error (m)', 'box_mae_comparison.png')
+    create_depth_comparison_plot(results_df, 'RMSE (m)', 'RMSE (m)', 'box_rmse_comparison.png')
+
+    # 2) Dense depth metrics (stratified)
+    print("\n=== Dense Depth Accuracy (Stratified) ===")
+    range_bins = ['0-10m', '10-25m', '25-50m', '>50m']
+    dense_results = []
+
+    # Process subset of frames for efficiency
+    from tqdm import tqdm
+    all_frames = sorted(glob(os.path.join(base_dir, "debug", "*_fused_depth.npy")))
+    frames_to_process = all_frames[::5]  # Take every 5th frame
+    print(f"Processing {len(frames_to_process)} frames out of {len(all_frames)} total frames...")
+
+    # Initialize storage for depth values
+    range_data = {rb: {'mono': [], 'fused': [], 'gt': []} for rb in range_bins}
+    valid_frame_count = 0
+    total_valid_points = 0
+
+    # Progress bar setup
+    pbar = tqdm(frames_to_process, desc="Processing frames", unit="frame")
+    for f in pbar:
+        frame_id = os.path.basename(f).split('_')[0]
+        try:
+            d = load_depth_data(base_dir, frame_id)
+            
+            # Create validity mask
+            lidar_valid = np.isfinite(d['lidar']) & (d['lidar'] > EPS) & d['lidar_mask']
+            mono_valid = np.isfinite(d['mono']) & (d['mono'] > EPS)
+            fused_valid = np.isfinite(d['fused']) & (d['fused'] > EPS)
+            
+            # Combined mask
+            valid_mask = lidar_valid & mono_valid & fused_valid
+            n_valid = valid_mask.sum()
+            
+            if n_valid < 100:
+                continue
+                
+            # Extract valid depths
+            gt_depths = d['lidar'][valid_mask]
+            mono_depths = d['mono'][valid_mask]
+            fused_depths = d['fused'][valid_mask]
+            
+            # Add to appropriate range bins
+            for rb in range_bins:
+                if rb == '0-10m':
+                    mask = gt_depths <= 10
+                elif rb == '10-25m':
+                    mask = (gt_depths > 10) & (gt_depths <= 25)
+                elif rb == '25-50m':
+                    mask = (gt_depths > 25) & (gt_depths <= 50)
+                else:  # >50m
+                    mask = gt_depths > 50
+                
+                if mask.sum() > 0:
+                    range_data[rb]['gt'].extend(gt_depths[mask])
+                    range_data[rb]['mono'].extend(mono_depths[mask])
+                    range_data[rb]['fused'].extend(fused_depths[mask])
+            
+            valid_frame_count += 1
+            total_valid_points += n_valid
+            
+        except Exception as e:
+            print(f"Error processing frame {frame_id}: {str(e)}")
+            continue
+
+    print(f"\nProcessed {valid_frame_count} frames with {total_valid_points} total valid points")
+
+    # Compute metrics for each range bin
+    print("\nComputing metrics...")
+    metrics_pbar = tqdm(total=len(range_bins)*2, desc="Computing metrics", unit="method")
+    for rb in range_bins:
+        for method in ['mono', 'fused']:
+            pred = np.array(range_data[rb][method])
+            gt = np.array(range_data[rb]['gt'])
+            metrics_pbar.update(1)
+            
+            if len(pred) > 100:
+                m = compute_depth_metrics_with_ci(pred, gt, np.ones(len(pred), dtype=bool))
+                ci_abs_rel = (m['abs_rel_ci'][1] - m['abs_rel_ci'][0]) / 2
+                ci_rmse = (m['rmse_ci'][1] - m['rmse_ci'][0]) / 2
+                
+                dense_results.append({
+                    'Method': method.capitalize(),
+                    'Range': rb,
+                    'AbsRel': f"{m['abs_rel']:.3f} ± {ci_abs_rel:.3f}",
+                    'RMSE': f"{m['rmse']:.3f} ± {ci_rmse:.3f}",
+                    'N': len(pred)
+                })
+            else:
+                print(f"WARNING: Insufficient points for {method} at {rb} (N={len(pred)})")
+
+    # Create DataFrame and print results
+    df_dense = pd.DataFrame(dense_results)
+    print("\nDense Depth Results:")
+    print(df_dense.to_string(index=False))
+            
+    # Create dense depth plots right after computing the metrics
+    dense_df = pd.DataFrame(dense_results)
+    if not dense_df.empty:
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
+        plt.title('Dense AbsRel by Range')
+        plt.ylabel('AbsRel')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
+        plt.close()
+
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
+        plt.title('Dense RMSE by Range')
+        plt.ylabel('RMSE (m)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
+        plt.close()
+    # Create dense depth plots right after computing the metrics
+    dense_df = pd.DataFrame(dense_results)
+    if not dense_df.empty:
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
+        plt.title('Dense AbsRel by Range')
+        plt.ylabel('AbsRel')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
+        plt.close()
+
+        plt.figure(figsize=(8,5))
+        sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
+        plt.title('Dense RMSE by Range')
+        plt.ylabel('RMSE (m)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
+        plt.close()
+
+    print("\nDense Depth Accuracy (vs LiDAR, stratified):")
+    dense_results_df = pd.DataFrame(dense_results).round(3)
+    print(dense_results_df)
+    
+    # Create visualizations for dense metrics
+    create_depth_comparison_plot(dense_results_df, 'AbsRel', 'Absolute Relative Error', 'dense_absrel_comparison.png')
+    create_depth_comparison_plot(dense_results_df, 'RMSE', 'RMSE (m)', 'dense_rmse_comparison.png')
+
+    # Create comprehensive results visualization
+    try:
+        if 'fm_m' in locals() and 'fm_f' in locals():
+            ecw_df = pd.DataFrame({
+                'Method': ['Mono', 'Fused'],
+                'Precision': [fm_m['Precision'], fm_f['Precision']],
+                'Recall': [fm_m['Recall'], fm_f['Recall']],
+                'F1': [fm_m['F1'], fm_f['F1']]
+            })
+        else:
+            # Create placeholder ECW metrics if not computed
+            ecw_df = pd.DataFrame({
+                'Method': ['Mono', 'Fused'],
+                'Precision': [0.0, 0.0],
+                'Recall': [0.0, 0.0],
+                'F1': [0.0, 0.0]
+            })
+            print("ECW metrics computed successfully")
+
+        create_summary_dashboard(
+            depth_df=dense_results_df,
+            ttc_df=pd.DataFrame(cv_by_range) if cv_by_range else None,
+            ecw_df=ecw_df
+        )
+    except Exception as e:
+        print(f"Warning: Could not create summary dashboard: {str(e)}")
+
+    # 3) ECW frame-level metrics (Fair GT: derivative-based, smoothed LiDAR TTC, class-aware persistence, range bins, ±0.5s tolerance)
+    # Generate qualitative visualizations
+    print("\n=== Generating Qualitative Visualizations ===")
+    try:
+        from visualize_qualitative import generate_qualitative_results
+        generate_qualitative_results(base_dir)
+    except Exception as e:
+        print(f"Error generating qualitative visualizations: {str(e)}")
+
+    print("\n=== Early Collision Warning Analysis ===")
+    obj_df = pd.read_csv(os.path.join(base_dir, 'object_depth_metrics.csv'))
+    
+    # Import plotting utilities
+    from plot_utils import create_comparison_dashboard
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.join(os.path.dirname(base_dir), 'eval_output')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"Total records: {len(obj_df)}")
+    
+    # Warning flags analysis
+    print("\n=== Warning Flags Distribution ===")
+    print("warn_raw:", obj_df['warn_raw'].value_counts())
+    print("warn_stable:", obj_df['warn_stable'].value_counts())
+    print("warn_raw_fused:", obj_df['warn_raw_fused'].value_counts())
+    print("warn_stable_fused:", obj_df['warn_stable_fused'].value_counts())
+    
+    # TTC Analysis
+    print("\n=== TTC Statistics ===")
+    print("TTC distribution:")
+    # Filter out inf and nan values for meaningful statistics
+    valid_ttc = obj_df[np.isfinite(obj_df['ttc'])]['ttc']
+    print("\nValid TTC values statistics:")
+    ttc_stats = valid_ttc.describe()
+    print(ttc_stats)
+    
+    # Report on invalid values
+    total_ttc = len(obj_df['ttc'])
+    inf_ttc = np.isinf(obj_df['ttc']).sum()
+    nan_ttc = np.isnan(obj_df['ttc']).sum()
+    print(f"\nTTC Value Distribution:")
+    print(f"Total measurements: {total_ttc}")
+    print(f"Valid measurements: {len(valid_ttc)}")
+    print(f"Infinite values: {inf_ttc} ({inf_ttc/total_ttc*100:.1f}%)")
+    print(f"NaN values: {nan_ttc} ({nan_ttc/total_ttc*100:.1f}%)")
+    
+    # Count objects by class with warnings
+    print("\n=== Objects with Warnings by Class ===")
+    warnings = obj_df[obj_df['warn_raw'] | obj_df['warn_raw_fused']]
+    print(warnings['class'].value_counts())
+    
+    # Analyze depth ranges for warning cases
+    print("\n=== Depth Analysis for Warning Cases ===")
+    warnings_depth = obj_df[obj_df['warn_raw'] | obj_df['warn_raw_fused']]
+    print("\nDepth statistics for warning cases:")
+    print("Mono depth:", warnings_depth['mono_median_depth'].describe())
+    print("Lidar depth:", warnings_depth['lidar_median_depth'].describe())
+    print("Fused depth:", warnings_depth['fused_median_depth'].describe())
+
+    print("\n=== Early Collision Warning Performance (Frame-Level, Fair GT) ===")
+    fps = 25.0
+    ego_speed = 10.33
+    tol_frames = 12  # ±0.5s tolerance
+    K_LIDAR_MIN = 15
+
+    base_mask = (obj_df['in_ecw'] & obj_df['meets_size'] &
+                 (obj_df['depth_valid_px'] >= 50) & obj_df['lidar_median_depth'].notna())
+    df = obj_df[base_mask].copy()
+    df['bbox'] = df['bbox'].apply(safe_bbox)
+
+    # Prefer fused depth for TTC if LiDAR is too sparse
+    def get_depth_for_ttc(row):
+        if pd.isna(row['lidar_median_depth']) or (row.get('depth_valid_px', 0) < K_LIDAR_MIN):
+            return float(row['fused_median_depth']) if pd.notna(row['fused_median_depth']) else np.nan
+        return float(row['lidar_median_depth'])
+    df['depth_for_ttc'] = df.apply(get_depth_for_ttc, axis=1)
+
+    # Smoothing: rolling median on depth
+    df = df.sort_values(['obj_id','frame'])
+    df['depth_smooth'] = df.groupby('obj_id')['depth_for_ttc'].transform(lambda s: s.rolling(3, min_periods=2).median())
+
+    # Derivative-based TTC
+    def ttc_from_series(depth_series, fps=25.0, eps=1e-6):
+        d = pd.to_numeric(depth_series, errors='coerce').values
+        ttc = np.full_like(d, np.nan, dtype=float)
+        for k in range(1, len(d)):
+            if np.isfinite(d[k]) and np.isfinite(d[k-1]):
+                try:
+                    dzdt = (d[k] - d[k-1]) * fps
+                    if dzdt < -eps:  # Only compute TTC for approaching objects
+                        ttc_val = d[k] / (-dzdt)
+                        if 0 < ttc_val < 20.0:  # Reasonable TTC range
+                            ttc[k] = ttc_val
+                except (ZeroDivisionError, RuntimeWarning):
+                    continue
+        return pd.Series(ttc, index=depth_series.index)
+    df['ttc_lidar_deriv'] = df.groupby('obj_id')['depth_smooth'].transform(lambda s: ttc_from_series(s, fps=fps))
+
+    # Class thresholds, context-aware (scale by speed bin if desired)
+    def context_ttc_thresh(cls_name, speed=ego_speed):
+        base = class_ttc_thresh(cls_name)
+        # Example: scale threshold by speed bin (city/highway)
+        if speed < 6.0:
+            return base * 1.2
+        elif speed > 18.0:
+            return base * 0.8
+        return base
+    df['T_warn'] = df['class'].apply(lambda c: context_ttc_thresh(c, speed=ego_speed))
+
+    # Range-aware GT: only consider objects within relevant range
+    def range_bin(row):
+        d = row['depth_for_ttc']
+        if pd.isna(d): return 'nan'
+        if d <= 10: return '0-10m'
+        if d <= 20: return '10-20m'
+        if d <= 30: return '20-30m'
+        return '>30m'
+    df['range_bin'] = df.apply(range_bin, axis=1)
+
+    # Raw GT hazard: TTC ≤ threshold
+    df['gt_raw'] = np.isfinite(df['ttc_lidar_deriv']) & (df['ttc_lidar_deriv'] <= df['T_warn'])
+
+    # M-of-N persistence: 2-of-3 for VRU, 3-of-3 for vehicles
+    def m_of_n_persistence(flags_bool, m=2, n=3):
+        roll = pd.Series(flags_bool.astype(int)).rolling(n, min_periods=1).sum()
+        return (roll >= m).astype(bool).values
+
+    def stable_flag(g):
+        raw = g['gt_raw'].to_numpy()
+        cls = g['class'].iloc[0] if len(g) > 0 else None
+        vru_tokens = ['person','ped','pedestrian','bicycle','bike','cyclist','motorcycle','rider','vru']
+        if any(k in str(cls).lower() for k in vru_tokens):
+            stable = m_of_n_persistence(raw, m=2, n=3)
+        else:
+            stable = m_of_n_persistence(raw, m=3, n=3)
+        return pd.Series(stable, index=g.index)
+
+    # Set ground truth hazard flags
+    df['gt_hazard'] = df.groupby('obj_id', group_keys=False)[['gt_raw','class']].apply(stable_flag)
+
+    # --- Prediction logic: method-specific TTC, smoothing, persistence, hysteresis ---
+    for method, depth_col in [('mono','mono_median_depth'), ('fused','fused_median_depth')]:
+        # Smoothing
+        df[f'depth_smooth_{method}'] = df.groupby('obj_id')[depth_col].transform(lambda s: s.ewm(alpha=0.4).mean())
+        # Derivative-based TTC
+        df[f'ttc_{method}'] = df.groupby('obj_id')[f'depth_smooth_{method}'].transform(lambda s: ttc_from_series(s, fps=fps))
+        # Persistence: 2-of-3 for VRU, 3-of-3 for vehicles
+        wr, ws = [], []
+        for oid, g in df.sort_values(['obj_id','frame']).groupby('obj_id', sort=False):
+            cls = g['class'].iloc[0] if len(g) > 0 else None
+            vru_tokens = ['person','ped','pedestrian','bicycle','bike','cyclist','motorcycle','rider','vru']
+            if any(k in str(cls).lower() for k in vru_tokens):
+                m, n = 2, 3
+            else:
+                m, n = 3, 3
+            w_raw = np.isfinite(g[f'ttc_{method}']) & (g[f'ttc_{method}'] <= g['T_warn'])
+            w_stable = m_of_n_persistence(w_raw, m=m, n=n)
+            wr.append(pd.Series(w_raw, index=g.index))
+            ws.append(pd.Series(w_stable, index=g.index))
+        df[f'warn_raw_{method}']   = pd.concat(wr).sort_index()
+        df[f'warn_stable_{method}']= pd.concat(ws).sort_index()
+
+    # --- Frame-level metrics with ±tol_frames tolerance ---
+    def frame_metrics_for(method):
+        try:
+            if f'warn_stable_{method}' not in df.columns or 'gt_hazard' not in df.columns:
+                print(f"Warning: Required columns missing for {method} metrics")
+                return dict(Total=0, TP=0, FP=0, FN=0, Precision=0.0, Recall=0.0, F1=0.0)
+
+            pred = df[f'warn_stable_{method}'].astype(bool)
+            gt = df['gt_hazard'].astype(bool)
+            
+            # TP: pred within ±tol_frames of GT
+            tp = 0
+            gt_idx = np.where(gt)[0]
+            pred_idx = np.where(pred)[0]
+            
+            # Handle empty predictions or ground truth
+            if len(gt_idx) == 0 and len(pred_idx) == 0:
+                return dict(Total=int(len(df)), TP=0, FP=0, FN=0, Precision=1.0, Recall=1.0, F1=1.0)
+            elif len(gt_idx) == 0:
+                return dict(Total=int(len(df)), TP=0, FP=len(pred_idx), FN=0, Precision=0.0, Recall=1.0, F1=0.0)
+            elif len(pred_idx) == 0:
+                return dict(Total=int(len(df)), TP=0, FP=0, FN=len(gt_idx), Precision=1.0, Recall=0.0, F1=0.0)
+            
+            for i in gt_idx:
+                if any(abs(i-j) <= tol_frames for j in pred_idx):
+                    tp += 1
+                    
+            fp = sum(not any(abs(j-i) <= tol_frames for i in gt_idx) for j in pred_idx)
+            fn = sum(not any(abs(i-j) <= tol_frames for j in pred_idx) for i in gt_idx)
+            
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2*prec*rec/(prec+rec) if (prec+rec) > 0 else 0.0
+            
+            return dict(Total=int(len(df)), TP=tp, FP=fp, FN=fn, Precision=prec, Recall=rec, F1=f1)
+        except Exception as e:
+            print(f"Warning: Error computing metrics for {method}: {str(e)}")
+            return dict(Total=0, TP=0, FP=0, FN=0, Precision=0.0, Recall=0.0, F1=0.0)
+
+    # Compute frame-level metrics with error handling
+    try:
+        fm_m = frame_metrics_for('mono')
+        fm_f = frame_metrics_for('fused')
+        print("\nFrame-level metrics computed successfully")
+    except Exception as e:
+        print(f"\nError computing frame-level metrics: {str(e)}")
+        fm_m = fm_f = dict(Total=0, TP=0, FP=0, FN=0, Precision=0.0, Recall=0.0, F1=0.0)
+    fm = pd.DataFrame({'Metric':['Total','TP','FP','FN','Precision','Recall','F1'],
+                       'Mono':[fm_m['Total'], fm_m['TP'], fm_m['FP'], fm_m['FN'],
+                               f"{fm_m['Precision']*100:.1f}%", f"{fm_m['Recall']*100:.1f}%", f"{fm_m['F1']*100:.1f}%"],
+                       'Fused':[fm_f['Total'], fm_f['TP'], fm_f['FP'], fm_f['FN'],
+                                f"{fm_f['Precision']*100:.1f}%", f"{fm_f['Recall']*100:.1f}%", f"{fm_f['F1']*100:.1f}%"]})
+    print(fm.to_string(index=False))
+
+    # 4) ECW event-level metrics
+    print("\n=== Early Collision Warning (Event-Level) ===")
+    
+    # Store lead times for visualization
+    lead_times_dict = {'Mono': [], 'Fused': []}
+    
+    gt_events = build_events_from_labels(df[['obj_id','frame','bbox','gt_hazard']]
+                                         .rename(columns={'gt_hazard':'label'}), 'label')
+    pred_events_m = build_events_from_labels(df[['obj_id','frame','bbox','warn_stable_mono']]
+                                             .rename(columns={'warn_stable_mono':'label'}), 'label')
+    pred_events_f = build_events_from_labels(df[['obj_id','frame','bbox','warn_stable_fused']]
+                                             .rename(columns={'warn_stable_fused':'label'}), 'label')
+
+    def summarize_events(pred_events, gt_events):
+        TP, FP, FN, lead_times = match_events(pred_events, gt_events, fps=fps, iou_thr=0.3)
+        prec = TP/(TP+FP) if (TP+FP)>0 else 0.0
+        rec  = TP/(TP+FN) if (TP+FN)>0 else 0.0
+        f1   = 2*prec*rec/(prec+rec) if (prec+rec)>0 else 0.0
+        lt_mean = float(np.mean(lead_times)) if len(lead_times)>0 else np.nan
+        lt_med  = float(np.median(lead_times)) if len(lead_times)>0 else np.nan
+        minutes = (df['frame'].nunique() / (fps*60.0))
+        falm = FP / minutes if minutes>0 else np.nan
+        return dict(Total_Events=TP+FN, TP=TP, FP=FP, FN=FN,
+                    Precision=prec, Recall=rec, F1=f1,
+                    LeadTime_mean=lt_mean, LeadTime_median=lt_med, FalseAlarmsPerMin=falm)
+
+    ev_m = summarize_events(pred_events_m, gt_events.copy())
+    ev_f = summarize_events(pred_events_f, gt_events.copy())
+
+    ev = pd.DataFrame([ev_m, ev_f], index=['Mono','Fused'])
+    for c in ['Precision','Recall','F1']:
+        ev[c] = ev[c].apply(lambda x: f"{x*100:.1f}%")
+    for c in ['LeadTime_mean','LeadTime_median']:
+        ev[c] = ev[c].apply(lambda x: f"{x:.2f}s" if np.isfinite(x) else "N/A")
+    ev['FalseAlarmsPerMin'] = ev['FalseAlarmsPerMin'].apply(lambda x: f"{x:.2f}")
+    print(ev)
+    
+    # Create lead time distribution plot
+    create_leadtime_distribution_plot(lead_times_dict)
+    
+    if cv_by_range:
+        create_ttc_stability_plot(pd.DataFrame(cv_by_range))
+
+    # 5) Timing
+    print("\n=== Pipeline Timing ===")
+    timing_path = os.path.join(base_dir, 'timing.csv')
+    if os.path.exists(timing_path):
+        try:
+            timing_df = pd.read_csv(timing_path)
+            avg_times = timing_df.mean(numeric_only=True).round(2)
+            print("\nAverage Pipeline Timing (ms):")
+            # Print only the timing columns that exist in the DataFrame
+            timing_columns = [col for col in ['t_pre_ms', 't_depth_ms', 't_fuse_ms', 't_post_ms', 't_total_ms'] 
+                            if col in timing_df.columns]
+            for col in timing_columns:
+                friendly_name = {
+                    't_pre_ms': 'Pre-processing',
+                    't_depth_ms': 'Depth estimation',
+                    't_fuse_ms': 'Fusion',
+                    't_post_ms': 'Post-processing',
+                    't_total_ms': 'Total'
+                }.get(col, col)
+                print(f"  {friendly_name}:".ljust(20) + f"{avg_times[col]:.2f}")
+            if 'backend' in timing_df.columns:
+                print(f"Backend: {timing_df['backend'].iloc[0]}")
+        except Exception as e:
+            print(f"Error reading timing data: {str(e)}")
+    else:
+        print("No timing data available")
+
+    # 6) Qualitative Analysis
+    print("\n=== Qualitative Analysis ===")
+    
+    def generate_scenario_visualization(scenario_type, frame_id):
+        """Generate visualization for a specific scenario type."""
+        frame_data = {
+            'rgb': plt.imread(os.path.join(base_dir, f'debug/{frame_id}_rgb.png')),
+            'mono_depth': np.load(os.path.join(base_dir, f'debug/{frame_id}_mono_depth.npy')),
+            'fused_depth': np.load(os.path.join(base_dir, f'debug/{frame_id}_fused_depth.npy')),
+            'lidar_points': np.load(os.path.join(base_dir, f'debug/{frame_id}_lidar_projected.npy')),
+        }
+        
+        # Get detection boxes and warnings
+        obj_slice = obj_df[obj_df['frame'] == frame_id]
+        frame_data['boxes'] = obj_slice['bbox'].apply(safe_bbox).tolist()
+        frame_data['warnings'] = obj_slice['warn_stable_fused'].values
+        
+        output_path = os.path.join(output_dir, f'figure7_{scenario_type}.png')
+        create_qualitative_visualization(frame_data, output_path, scenario_type)
+        
+        # Create timeline if available
+        if len(obj_slice) > 0:
+            obj_id = obj_slice.iloc[0]['obj_id']
+            obj_history = obj_df[obj_df['obj_id'] == obj_id].sort_values('frame')
+            
+            timeline_data = {
+                'time': np.arange(len(obj_history)) / 25.0,  # Assuming 25 fps
+                'ttc': obj_history['ttc'].values,
+                'warning_state': obj_history['warn_stable_fused'].values,
+                'ttc_threshold': obj_history['T_warn'].iloc[0],
+                't_star': obj_history[obj_history['warn_stable_fused']].index[0] / 25.0
+                if any(obj_history['warn_stable_fused']) else None
+            }
+            
+            timeline_path = os.path.join(output_dir, f'timeline_{scenario_type}.png')
+            create_timeline_strip(timeline_data, timeline_path)
+    
+    # Generate visualizations for key scenarios
+    scenarios = {
+        'fused_depth': 18050,  # Example frame showing good fusion
+        'missed_detection': 18075,  # Frame with VRU detection
+        'glare_robustness': 18100,  # High-glare scene
+        'highway_cutin': 18150,  # Fast lateral cut-in case
+    }
+    
+    for scenario, frame_id in scenarios.items():
+        try:
+            print(f"Generating visualization for {scenario}...")
+            generate_scenario_visualization(scenario, frame_id)
+        except Exception as e:
+            print(f"Failed to generate {scenario} visualization: {e}")
+    
+    print("\nQualitative visualizations saved in output directory")
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', default='data/fused_output',
-                       help='Directory containing results (with debug/ subfolder)')
+                        help='Directory with results (and debug/)')
     args = parser.parse_args()
-    
     compare_depth_methods(args.data_dir)
