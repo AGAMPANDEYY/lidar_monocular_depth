@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import os
 import re
@@ -14,7 +15,7 @@ def extract_frame_number(filename):
     return None
 
 def convert_lidar_to_camera_frame(lidar_frame, lidar_fps=10, camera_fps=25, camera_start=15000, lidar_start=6000):
-    """Convert LiDAR frame number to corresponding camera frame number using proper time-based rounding.
+    """Convert LiDAR frame number to corresponding camera frame number.
     
     Args:
         lidar_frame: LiDAR frame number
@@ -22,16 +23,11 @@ def convert_lidar_to_camera_frame(lidar_frame, lidar_fps=10, camera_fps=25, came
         camera_fps: Camera frames per second (default 25)
         camera_start: Starting frame number for camera (default 15000)
         lidar_start: Starting frame number for LiDAR (default 6000)
-    
-    Returns:
-        Closest matching camera frame number based on actual timing
     """
-    # Calculate precise time from start for this LiDAR frame
+    # Calculate time from start for this LiDAR frame
     lidar_time = (lidar_frame - lidar_start) / lidar_fps  # time in seconds
-    
-    # Convert to camera frame using proper rounding
-    camera_frame = camera_start + round(lidar_time * camera_fps)
-    
+    # Convert to equivalent camera frame
+    camera_frame = camera_start + int(lidar_time * camera_fps)
     return camera_frame
 
 def find_matching_image(frame_num, image_dir, max_frame_diff=5):
@@ -43,7 +39,7 @@ def find_matching_image(frame_num, image_dir, max_frame_diff=5):
         max_frame_diff: Maximum allowed frame number difference
     """
     # Convert LiDAR frame to expected camera frame
-    camera_frame = convert_lidar_to_camera_frame(frame_num) 
+    camera_frame = convert_lidar_to_camera_frame(frame_num)
     
     # Try exact match first
     exact_match = os.path.join(image_dir, f"{camera_frame:05d}.png")
@@ -63,14 +59,13 @@ def find_matching_image(frame_num, image_dir, max_frame_diff=5):
             continue
             
         img_num = int(basename)
-        diff = abs(img_num - camera_frame)  # Compare with converted camera frame number
+        diff = abs(img_num - frame_num)
         if diff < min_diff:
             min_diff = diff
             closest = img
     
     if closest and min_diff <= max_frame_diff:
-        closest_frame = int(os.path.splitext(os.path.basename(closest))[0])
-        print(f"Found close frame match: LiDAR {frame_num} (expected camera {camera_frame}) -> Camera {closest_frame} (diff: {min_diff} frames)")
+        print(f"Found close frame match: LiDAR {frame_num} -> Camera {os.path.splitext(os.path.basename(closest))[0]} (diff: {min_diff} frames)")
         return closest, min_diff
     else:
         return None, min_diff
@@ -87,10 +82,10 @@ def main():
                       help='Camera intrinsics YAML file')
     parser.add_argument('--ext_yaml', default='calibration/extrinsics_lidar_to_cam.yaml',
                       help='LiDAR-to-camera extrinsics YAML file')
-    parser.add_argument('--cy_offset', type=int, default=0,
-                      help='Manual Y-axis offset (use 0 unless fine-tuning)')
-    parser.add_argument('--cx_offset', type=int, default=0,
-                      help='Manual X-axis offset (use 0 unless fine-tuning)')
+    parser.add_argument('--cy_offset', type=int, default=80,
+                      help='Manual Y-axis offset')
+    parser.add_argument('--cx_offset', type=int, default=30,
+                      help='Manual X-axis offset')
     parser.add_argument('--start_frame', type=int, default=None,
                       help='Start processing from this frame number')
     parser.add_argument('--end_frame', type=int, default=None,

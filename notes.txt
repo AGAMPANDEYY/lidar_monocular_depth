@@ -157,6 +157,8 @@ python main.py \
   --miss_dilate 10 \
   --max_frames 3000
 
+LATEST NEW FOR 1 MINUTE CAMERA 
+
   python main.py \
   --camera_start 18000 --camera_end 21000 \
   --lidar_start 7206 --lidar_end 8406 \
@@ -165,7 +167,7 @@ python main.py \
   --ecw_bot_w 0.90 \
   --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 \
   --miss_dilate 10 \
-  --max_frames 3000 \
+  --max_frames 1500 \
   --ecw_use_fused
 
   OLD INTRSICS Extrinsic
@@ -220,3 +222,9 @@ Object-level depth statistics
 ABLATION STUDIES 
 
 python scripts/run_ablation_study.py --data_dir data/fused_output
+
+
+GENERATE FIGURES
+
+
+ython scripts/generate_paper_figures.py --frame 27425  (frame correpsodong to 18:17min)

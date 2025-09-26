@@ -81,7 +81,7 @@ MAX_SIZE_M = {'width': 2.5, 'height': 3.0}  # maximum object size in meters
 FRAME_DIR = 'data/frames'
 LIDAR_DIR = 'data/lidar'  # Changed to match where LiDAR files actually are
 OUT_DIR   = 'data/fused_output'
-YOLO_WEIGHTS =  "detection/best.pt" #'detection/best-e150 (1).pt'
+YOLO_WEIGHTS = 'detection/best-e150 (1).pt'
 
 os.makedirs(OUT_DIR, exist_ok=True)
 DBG_DIR = os.path.join(OUT_DIR, "debug")
@@ -438,6 +438,20 @@ def main():
         pred_bboxes = run_obstacle_detection(img_np, yolo_model)
         t1 = time.perf_counter()
         print(f"  [DET] objects: {len(pred_bboxes)}")
+
+        # Save detection visualization
+        det_vis_img = img_np.copy()
+        for box in pred_bboxes:
+            x1, y1, x2, y2 = map(int, box[:4])
+            cls_idx = int(box[4])
+            conf = float(box[5])
+            cv2.rectangle(det_vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            label = f"{CLASSES[cls_idx]} ({conf:.2f})"
+            cv2.putText(det_vis_img, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        # Save detection visualization to debug folder
+        det_vis_path = os.path.join(DBG_DIR, f"{frame_id}_03_detection.png")
+        cv2.imwrite(det_vis_path, cv2.cvtColor(det_vis_img, cv2.COLOR_RGB2BGR))
 
         # Build detection dicts
         dets = []

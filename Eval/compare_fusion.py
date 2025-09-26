@@ -50,6 +50,13 @@ def create_qualitative_visualization(base_dir, frame_id, output_path):
         frame_id: Frame ID (e.g., '18000')
         output_path: Where to save the combined visualization
     """
+    import sys
+    import os
+    
+    # Add project root to Python path
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.append(project_root)
+    
     from modules.detection import load_yolo_model, run_obstacle_detection
     from modules.visualization import overlay_results
     import cv2
@@ -79,34 +86,15 @@ def create_qualitative_visualization(base_dir, frame_id, output_path):
 
     # 2. Object detection with bounding boxes
     ax2 = plt.subplot(232)
-    detection_path = os.path.join(base_dir, "debug", f"{frame_id}_00_det_on_image.png")
+    detection_path = os.path.join(base_dir, "debug", f"{frame_id}_03_overlay_detection.png")
     
     if os.path.exists(detection_path):
         det_img = plt.imread(detection_path)
         ax2.imshow(det_img)
     else:
         print(f"Detection visualization not found: {detection_path}")
-        print("Running object detection...")
-        if model is not None:
-            # Load image
-            img = cv2.imread(rgb_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
-            # Run detection
-            detections = run_obstacle_detection(model, img)
-            
-            # Create visualization
-            det_img = overlay_results(img.copy(), detections)
-            
-            # Save detection visualization
-            os.makedirs(os.path.dirname(detection_path), exist_ok=True)
-            cv2.imwrite(detection_path, cv2.cvtColor(det_img, cv2.COLOR_RGB2BGR))
-            
-            # Display
-            ax2.imshow(det_img)
-        else:
-            print("Warning: Could not run detection - YOLO model not loaded")
-            ax2.imshow(rgb)  # Show original image as fallback
+        det_img = rgb.copy()  # Use original image if detection overlay not found
+        ax2.imshow(det_img)
     
     ax2.set_title('Object Detection', color='white')
     ax2.set_xticks([])
@@ -985,6 +973,27 @@ def compare_depth_methods(base_dir):
 
     print("\n=== Early Collision Warning Analysis ===")
     obj_df = pd.read_csv(os.path.join(base_dir, 'object_depth_metrics.csv'))
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.join(os.path.dirname(base_dir), 'eval_output')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate visualizations for key scenarios
+    scenarios = {
+        'fused_depth': '18050',      # Example frame showing good fusion
+        'missed_detection': '18075',  # Frame with VRU detection
+        'glare_robustness': '18100',  # High-glare scene
+        'highway_cutin': '18150'      # Fast lateral cut-in case
+    }
+    
+    for scenario, frame_id in scenarios.items():
+        print(f"Generating visualization for {scenario}...")
+        output_path = os.path.join(output_dir, f'figure7_{scenario}.png')
+        try:
+            create_qualitative_visualization(base_dir, frame_id, output_path)
+            print(f"Saved visualization to: {output_path}")
+        except Exception as e:
+            print(f"Failed to generate {scenario} visualization: {e}")
     
     # Import plotting utilities
     from plot_utils import create_comparison_dashboard

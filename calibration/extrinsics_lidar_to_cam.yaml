@@ -1,7 +1,8 @@
-# calibration/extrinsics_lidar_to_cam.yaml
+# LiDAR -> Camera  (Velodyne: x fwd, y left, z up → OpenCV cam: x right, y down, z fwd)
+# LiDAR -> Camera (OpenCV): x_right, y_down, z_forward
 R:
- - [ 0.98394364, -0.08231555,  0.15836373]
- - [-0.14749651,  0.1245901 ,  0.98118402]
- - [-0.10049725, -0.98878787,  0.11044838]
-t:
- - [-0.52123579, -0.58580356,  8.99088397]
+  - [ 0.000000, -1.000000,  0.000000]     # y_L -> -x_C
+  - [-0.034899,  0.000000, -0.999391]     # 2° pitch-down (about x_C)
+  - [ 0.999391,  0.000000, -0.034899]     # x_L -> mostly +z_C
+
+t: [ 0.00, -0.48, -0.05 ]   # [x_right, y_down, z_forward]

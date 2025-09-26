@@ -271,14 +271,17 @@ def main():
     print(f"  Y: [{points[:, 1].min():.2f}, {points[:, 1].max():.2f}]")
     print(f"  Z: [{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
     
-    # Apply depth filtering in LiDAR frame first
-    # Based on your coordinate system, negative Z might be forward
-    if np.mean(points[:, 2]) < 0:
-        print("[INFO] Detected negative Z forward direction in LiDAR coordinates")
-        depth_mask = (points[:, 2] < -args.min_depth) & (points[:, 2] > -args.max_depth)
-    else:
-        print("[INFO] Using standard positive Z forward direction")
-        depth_mask = (points[:, 2] > args.min_depth) & (points[:, 2] < args.max_depth)
+    # Apply depth filtering in LiDAR frame - using negative Z as forward direction
+    print("[INFO] Using negative Z forward direction in LiDAR coordinates")
+    depth_mask = (points[:, 2] < -args.min_depth) & (points[:, 2] > -args.max_depth)  # Only keep negative Z values
+    
+    # Log coordinate ranges after filtering
+    points_filtered = points[depth_mask]
+    if len(points_filtered) > 0:
+        print(f"[DEBUG] Filtered points coordinate ranges:")
+        print(f"  X: [{points_filtered[:, 0].min():.2f}, {points_filtered[:, 0].max():.2f}] m")
+        print(f"  Y: [{points_filtered[:, 1].min():.2f}, {points_filtered[:, 1].max():.2f}] m")
+        print(f"  Z: [{points_filtered[:, 2].min():.2f}, {points_filtered[:, 2].max():.2f}] m")
     
     points_filtered = points[depth_mask]
     print(f"[INFO] After depth filtering: {len(points_filtered)} points")
