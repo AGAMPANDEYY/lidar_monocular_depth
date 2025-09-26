@@ -114,68 +114,186 @@ Detection      47.06 21.25
    - Fusion is the main bottleneck (1436.69ms)
    - ECW computation is very efficient (66.37 FPS)
 
-## 5. Qualitative Analysis (Figure 7 Scenarios)
 
-### 5.1 Fused Depth Quality
-Key observations:
-- RGB+ECW visualization shows clear object boundaries with accurate warning masks
-- Monocular depth exhibits common artifacts: scale drift, bleeding at boundaries
-- LiDAR provides accurate but sparse measurements
-- Fused result combines:
-  * Sharp object boundaries from mono
-  * Metric accuracy from LiDAR
-  * Hole-filling without cross-boundary bleeding
-  * Consistent scale across varying ranges
 
-### 5.2 Missed-Detection Recovery
-Scenario: Partially occluded VRU
-- Detector initially misses the VRU due to partial occlusion
-- Depth-blob mining successfully:
-  * Identifies shallow-range component
-  * Recovers missed detection
-  * Triggers ECW with positive lead time
-Demonstrates effectiveness of mining strategy for safety-critical edge cases
+LATEST
 
-### 5.3 Glare/Low-Texture Robustness
-Environment: High-glare or low-texture scene
-Comparison:
-- Without sanity checks:
-  * Monocular estimates unreliable
-  * TTC exhibits spikes and flicker
-- With our approach:
-  * Sanity checks identify unreliable regions
-  * Down-weights monocular contribution
-  * LiDAR dominates fusion in affected areas
-  * Maintains stable TTC and warning state
 
-### 5.4 Highway Cut-in Case
-Scenario: Fast lateral vehicle cut-in
-System behavior:
-- Frame-wise metric scaling maintains depth consistency
-- Confidence-weighted fusion preserves accuracy at medium range
-- Results in:
-  * Earlier warning trigger
-  * More stable TTC estimates
-  * Reduced false positives
-Key metrics:
-- Lead time improvement: 0.5s earlier detection vs baseline
-- TTC stability: 47% reduction in coefficient of variation
-- Warning consistency: 28% reduction in flicker rate
 
-### 5.5 Timeline Visualization Analysis
-Representative case selection:
-1. VRU near-miss scenario
-   - Shows early warning capability
-   - TTC curve remains stable through occlusions
-   - Clear trigger point alignment with t*
+=== Box-Level Depth Accuracy (Stratified) ===
 
-2. Highway cut-in timeline
-   - Demonstrates rapid response to lateral threats
-   - Shows confidence-weighted fusion benefits
-   - Highlights warning stability improvements
+Box-Level Depth Error (vs LiDAR, stratified):
+  Method   Range  MAE (m)  RMSE (m)     N
+0   Mono   0-10m   12.598    14.612  1501
+1  Fused   0-10m    7.971    10.569  1501
+2   Mono  10-25m    5.349     6.609  2243
+3  Fused  10-25m    4.089     5.465  2243
+4   Mono  25-50m   16.582    18.043  3387
+5  Fused  25-50m   14.781    16.830  3387
+6   Mono    >50m   35.959    37.087   830
+7  Fused    >50m   35.456    36.689   830
 
-Key timeline features:
-- TTC curves show smooth progression without spurious jumps
-- Warning states maintain consistency without flicker
-- Trigger moments align well with ground truth t*
-- Clear visualization of warning lead time
+=== Dense Depth Accuracy (Stratified) ===
+Processing 600 frames out of 3000 total frames...
+Processing frames: 100%|█████████████████████████████████████| 600/600 [00:02<00:00, 239.01frame/s]
+
+Processed 596 frames with 7267947 total valid points
+
+Computing metrics...
+Computing metrics: 100%|█████████████████████████████████████████| 8/8 [04:04<00:00, 31.01s/method]
+Dense Depth Results:
+Method  Range        AbsRel           RMSE       N
+  Mono  0-10m 2.671 ± 0.022 12.694 ± 0.012 1361805
+ Fused  0-10m 1.044 ± 0.022  2.268 ± 0.013 1361805
+  Mono 10-25m 0.343 ± 0.000  6.448 ± 0.007 2919292
+ Fused 10-25m 0.058 ± 0.000  1.267 ± 0.002 2919292
+  Mono 25-50m 0.372 ± 0.000 16.175 ± 0.012 2114819
+ Fused 25-50m 0.117 ± 0.000  5.876 ± 0.006 2114819
+  Mono   >50m 0.666 ± 0.000 48.400 ± 0.038  872031
+ Fused   >50m 0.350 ± 0.000 31.506 ± 0.054  872031
+
+Dense Depth Accuracy (vs LiDAR, stratified):
+  Method   Range         AbsRel            RMSE        N
+0   Mono   0-10m  2.671 ± 0.022  12.694 ± 0.012  1361805
+1  Fused   0-10m  1.044 ± 0.022   2.268 ± 0.013  1361805
+2   Mono  10-25m  0.343 ± 0.000   6.448 ± 0.007  2919292
+3  Fused  10-25m  0.058 ± 0.000   1.267 ± 0.002  2919292
+4   Mono  25-50m  0.372 ± 0.000  16.175 ± 0.012  2114819
+5  Fused  25-50m  0.117 ± 0.000   5.876 ± 0.006  2114819
+6   Mono    >50m  0.666 ± 0.000  48.400 ± 0.038   872031
+7  Fused    >50m  0.350 ± 0.000  31.506 ± 0.054   872031
+ECW metrics computed successfully
+
+=== Generating Qualitative Visualizations ===
+
+=== Qualitative Analysis ===
+Generating visualization for fused_depth...
+Saved visualization to /Users/agampandey/work/lidar_monocular_depth/eval/output/fused_depth.png
+Generating visualization for missed_detection...
+Saved visualization to /Users/agampandey/work/lidar_monocular_depth/eval/output/missed_detection.png
+Generating visualization for glare_robustness...
+Saved visualization to /Users/agampandey/work/lidar_monocular_depth/eval/output/glare_robustness.png
+Generating visualization for highway_cutin...
+Saved visualization to /Users/agampandey/work/lidar_monocular_depth/eval/output/highway_cutin.png
+
+=== Early Collision Warning Analysis ===
+Total records: 8305
+
+=== Warning Flags Distribution ===
+warn_raw: warn_raw
+False    6915
+True     1390
+Name: count, dtype: int64
+warn_stable: warn_stable
+False    6985
+True     1320
+Name: count, dtype: int64
+warn_raw_fused: warn_raw_fused
+False    6853
+True     1385
+Name: count, dtype: int64
+warn_stable_fused: warn_stable_fused
+False    6918
+True     1320
+Name: count, dtype: int64
+
+=== TTC Statistics ===
+TTC distribution:
+
+Valid TTC values statistics:
+count    3525.000000
+mean        3.992861
+std         5.738466
+min         0.002085
+25%         0.522386
+50%         1.522822
+75%         4.165252
+max        20.000000
+Name: ttc, dtype: float64
+
+TTC Value Distribution:
+Total measurements: 8305
+Valid measurements: 3525
+Infinite values: 4773 (57.5%)
+NaN values: 7 (0.1%)
+
+=== Objects with Warnings by Class ===
+class
+Car       1011
+MTW        231
+LCV         72
+Others      55
+HV           9
+Auto         7
+Missed       5
+Name: count, dtype: int64
+
+=== Depth Analysis for Warning Cases ===
+
+Depth statistics for warning cases:
+Mono depth: count    1390.000000
+mean       19.955300
+std         5.621429
+min         9.940257
+25%        15.624927
+50%        18.742507
+75%        22.951245
+max        43.845412
+Name: mono_median_depth, dtype: float64
+Lidar depth: count    1356.000000
+mean       16.667163
+std        12.985830
+min         1.888724
+25%         7.346733
+50%        11.364610
+75%        22.135295
+max        78.311310
+Name: lidar_median_depth, dtype: float64
+Fused depth: count    1390.000000
+mean       16.570732
+std         6.127856
+min         3.796761
+25%        12.670531
+50%        16.129964
+75%        20.773117
+max        43.616508
+Name: fused_median_depth, dtype: float64
+
+=== Early Collision Warning Performance (Frame-Level, Fair GT) ===
+
+Frame-level metrics computed successfully
+   Metric   Mono  Fused
+    Total    387    387
+       TP      0      0
+       FP      2     10
+       FN      0      0
+Precision   0.0%   0.0%
+   Recall 100.0% 100.0%
+       F1   0.0%   0.0%
+
+=== Early Collision Warning (Event-Level) ===
+       Total_Events  TP  FP  FN  ...    F1 LeadTime_mean LeadTime_median FalseAlarmsPerMin
+Mono              0   0   2   0  ...  0.0%           N/A             N/A              9.09
+Fused             0   0   6   0  ...  0.0%           N/A             N/A             27.27
+
+[2 rows x 10 columns]
+/Users/agampandey/work/lidar_monocular_depth/eval/compare_fusion.py:468: UserWarning: No artists with labels found to put in legend.  Note that artists whose label start with an underscore are ignored when legend() is called with no argument.
+  plt.legend(title='Method')
+
+=== Pipeline Timing ===
+
+Average Pipeline Timing (ms):
+  Depth estimation: 576.15
+  Fusion:           1436.69
+  Total:            2074.97
+Backend: midas
+
+=== Qualitative Analysis ===
+Generating visualization for fused_depth...
+Failed to generate fused_depth visualization: 'T_warn'
+Generating visualization for missed_detection...
+Failed to generate missed_detection visualization: 'T_warn'
+Generating visualization for glare_robustness...
+Failed to generate glare_robustness visualization: 'T_warn'
+Generating visualization for highway_cutin...
+Failed to generate highway_cutin visualization: 'T_warn'

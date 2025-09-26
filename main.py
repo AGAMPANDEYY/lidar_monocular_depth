@@ -81,7 +81,7 @@ MAX_SIZE_M = {'width': 2.5, 'height': 3.0}  # maximum object size in meters
 FRAME_DIR = 'data/frames'
 LIDAR_DIR = 'data/lidar'  # Changed to match where LiDAR files actually are
 OUT_DIR   = 'data/fused_output'
-YOLO_WEIGHTS = 'detection/best-e150 (1).pt'
+YOLO_WEIGHTS =  "detection/best.pt" #'detection/best-e150 (1).pt'
 
 os.makedirs(OUT_DIR, exist_ok=True)
 DBG_DIR = os.path.join(OUT_DIR, "debug")
@@ -162,19 +162,26 @@ from run_baselines import BaselineRunner
 # Initialize baseline runner
 baseline_runner = BaselineRunner()
 
-def get_baseline_metrics(img_path):
-    """Get actual metrics from running baseline models"""
-    results = baseline_runner.run_comparison(img_path)
-    
-    baseline_metrics = {}
-    for model, metrics in results.items():
-        baseline_metrics[model] = {
-            'inference_time_ms': metrics['inference_time_ms'],
-            'memory_usage_mb': metrics['memory_usage_mb'],
-            'abs_rel_error': compute_error(metrics['depth'], metrics.get('gt_depth')),
-            'sq_rel_error': compute_sq_error(metrics['depth'], metrics.get('gt_depth'))
-        }
-    return baseline_metrics
+def compute_error(pred_depth, gt_depth):
+    """Compute absolute relative error between predicted and ground truth depth"""
+    if gt_depth is None:
+        return 0.0
+    mask = (gt_depth > 0) & np.isfinite(pred_depth) & np.isfinite(gt_depth)
+    if not mask.any():
+        return 0.0
+    return np.mean(np.abs(pred_depth[mask] - gt_depth[mask]) / gt_depth[mask])
+
+def compute_sq_error(pred_depth, gt_depth):
+    """Compute squared relative error between predicted and ground truth depth"""
+    if gt_depth is None:
+        return 0.0
+    mask = (gt_depth > 0) & np.isfinite(pred_depth) & np.isfinite(gt_depth)
+    if not mask.any():
+        return 0.0
+    return np.mean(((pred_depth[mask] - gt_depth[mask]) ** 2) / gt_depth[mask])
+
+# Define baseline metrics for comparison
+BASELINE_METRICS = {
     'LiDAR-Only': {  # Pure LiDAR processing
         'inference_time_ms': 25,
         'abs_rel_error': 0.089,
@@ -189,7 +196,32 @@ def get_baseline_metrics(img_path):
     }
 }
 
-def print_performance_comparison(current_metrics):
+def get_baseline_metrics(img_path):
+    """Get actual metrics from running baseline models"""
+    results = baseline_runner.run_comparison(img_path)
+    
+    baseline_metrics = {}
+    for model, metrics in results.items():
+        baseline_metrics[model] = {
+            'inference_time_ms': metrics['inference_time_ms'],
+            'memory_usage_mb': metrics['memory_usage_mb'],
+            'abs_rel_error': compute_error(metrics['depth'], metrics.get('gt_depth')),
+            'sq_rel_error': compute_sq_error(metrics['depth'], metrics.get('gt_depth'))
+        }
+    return baseline_metrics
+
+def collect_timing_stats(frame_timings):
+    """Collect timing statistics from frame processing"""
+    timing_rows = []
+    for frame_id, timings in frame_timings.items():
+        timing_rows.append({
+            't_depth_ms': timings.get('depth', 0),
+            't_fuse_ms': timings.get('fusion', 0),
+            't_total_ms': sum(timings.values())
+        })
+    return timing_rows
+
+def print_performance_comparison(current_metrics, timing_rows):
     """Print comparison with baselines"""
     print("\n========== Performance Comparison ==========")
     print(f"{'Method':<15} {'Inference(ms)':<15} {'Abs.Rel':<20} {'Memory(MB)':<12} {'Sq.Rel':<20}")

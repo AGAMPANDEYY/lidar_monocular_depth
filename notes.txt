@@ -205,6 +205,8 @@ python main.py --ecw_use_fused --depth_backend fastdepth --max_frames 100
 Then evaluate all results:
 
 python eval/compare_fusion.py --data_dir data/fused_output
+python Eval/save_and_visualize.py --data_dir data/fused_output
+python Eval/ablations.py --data_dir data/fused_output
 
 This will give you comprehensive tables showing:
 

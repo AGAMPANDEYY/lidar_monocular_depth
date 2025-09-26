@@ -4,6 +4,10 @@ import ast
 import numpy as np
 import pandas as pd
 from glob import glob
+import matplotlib
+matplotlib.use('Agg')  # Force non-interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 EPS = 1e-6
 
@@ -12,18 +16,10 @@ EPS = 1e-6
 # -------------------------------
 
 def classify_environment(frame_id):
-    """Classify environment based on frame_id or other metadata.
-    Returns: 'urban', 'semi-urban', or 'highway'
+    """All frames are classified as semi-urban for this dataset.
+    Returns: 'semi-urban'
     """
-    # This is a placeholder - you should implement proper classification
-    # based on your dataset metadata or frame characteristics
-    frame_num = int(frame_id)
-    if frame_num < 18020:  # Example thresholds
-        return 'urban'
-    elif frame_num < 18040:
-        return 'semi-urban'
-    else:
-        return 'highway'
+    return 'semi-urban'  # Single environment classification
 
 def safe_bbox(x):
     if isinstance(x, (list, tuple)):
@@ -46,46 +42,137 @@ def class_ttc_thresh(cls_name):
         return 2.0
     return 1.0
 
-def create_qualitative_visualization(frame_data, output_path, scenario_type):
-    """Create qualitative visualization for a specific scenario."""
-    fig = plt.figure(figsize=(15, 10))
+def create_qualitative_visualization(base_dir, frame_id, output_path):
+    """Create qualitative visualization using saved PNG images in a 2x3 layout.
     
-    # RGB with boxes and ECW
-    ax1 = plt.subplot(221)
-    ax1.imshow(frame_data['rgb'])
-    if 'boxes' in frame_data:
-        for box, warn in zip(frame_data['boxes'], frame_data['warnings']):
-            color = 'r' if warn else 'g'
-            rect = plt.Rectangle((box[0], box[1]), box[2]-box[0], box[3]-box[1],
-                               fill=False, color=color, linewidth=2)
-            ax1.add_patch(rect)
-    ax1.set_title('RGB with Detection & Warnings')
+    Args:
+        base_dir: Base directory containing fused output
+        frame_id: Frame ID (e.g., '18000')
+        output_path: Where to save the combined visualization
+    """
+    from modules.detection import load_yolo_model, run_obstacle_detection
+    from modules.visualization import overlay_results
+    import cv2
     
-    # Monocular depth
-    ax2 = plt.subplot(222)
-    mono_depth = plt.imshow(frame_data['mono_depth'], cmap='magma')
-    plt.colorbar(mono_depth, ax=ax2)
-    ax2.set_title('Monocular-Only Depth')
+    # Create figure with 2 rows, 3 columns
+    fig = plt.figure(figsize=(18, 12))
     
-    # LiDAR overlay
-    ax3 = plt.subplot(223)
-    ax3.imshow(frame_data['rgb'])  # Base RGB image
-    lidar_scatter = ax3.scatter(frame_data['lidar_points'][:, 0], 
-                              frame_data['lidar_points'][:, 1],
-                              c=frame_data['lidar_points'][:, 2],
-                              cmap='magma', alpha=0.5)
-    plt.colorbar(lidar_scatter, ax=ax3)
-    ax3.set_title('LiDAR Points Overlay')
+    # Turn off axes for cleaner visualization
+    plt.style.use('dark_background')
     
-    # Fused depth
-    ax4 = plt.subplot(224)
-    fused_depth = plt.imshow(frame_data['fused_depth'], cmap='magma')
-    plt.colorbar(fused_depth, ax=ax4)
-    ax4.set_title('Fused Depth')
+    # Load YOLO model (will be used if detection visualization doesn't exist)
+    try:
+        model = load_yolo_model("detection/best.pt")
+    except Exception as e:
+        print(f"Warning: Could not load YOLO model: {e}")
+        model = None
     
-    plt.suptitle(f'Scenario: {scenario_type}')
-    plt.tight_layout()
-    plt.savefig(output_path)
+    # 1. Original monocular camera frame
+    ax1 = plt.subplot(231)
+    rgb_path = os.path.join(base_dir, "debug", f"{frame_id}_00_image.png")
+    if os.path.exists(rgb_path):
+        rgb = plt.imread(rgb_path)
+        ax1.imshow(rgb)
+        ax1.set_title('Original Frame', color='white')
+    ax1.set_xticks([])
+    ax1.set_yticks([])
+
+    # 2. Object detection with bounding boxes
+    ax2 = plt.subplot(232)
+    detection_path = os.path.join(base_dir, "debug", f"{frame_id}_00_det_on_image.png")
+    
+    if os.path.exists(detection_path):
+        det_img = plt.imread(detection_path)
+        ax2.imshow(det_img)
+    else:
+        print(f"Detection visualization not found: {detection_path}")
+        print("Running object detection...")
+        if model is not None:
+            # Load image
+            img = cv2.imread(rgb_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # Run detection
+            detections = run_obstacle_detection(model, img)
+            
+            # Create visualization
+            det_img = overlay_results(img.copy(), detections)
+            
+            # Save detection visualization
+            os.makedirs(os.path.dirname(detection_path), exist_ok=True)
+            cv2.imwrite(detection_path, cv2.cvtColor(det_img, cv2.COLOR_RGB2BGR))
+            
+            # Display
+            ax2.imshow(det_img)
+        else:
+            print("Warning: Could not run detection - YOLO model not loaded")
+            ax2.imshow(rgb)  # Show original image as fallback
+    
+    ax2.set_title('Object Detection', color='white')
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+
+    # 3. Monocular depth estimation
+    ax3 = plt.subplot(233)
+    mono_path = os.path.join(base_dir, "debug", f"{frame_id}_01_mono_depth.png")
+    if os.path.exists(mono_path):
+        mono_img = plt.imread(mono_path)
+        ax3.imshow(mono_img)
+        ax3.set_title('Monocular Depth', color='white')
+    else:
+        print(f"Warning: Could not find mono depth image: {mono_path}")
+    ax3.set_xticks([])
+    ax3.set_yticks([])
+
+    # 4. LiDAR mask
+    ax4 = plt.subplot(234)
+    lidar_mask_path = os.path.join(base_dir, "debug", f"{frame_id}_03_lidar_mask.png")
+    if os.path.exists(lidar_mask_path):
+        lidar_mask = plt.imread(lidar_mask_path)
+        ax4.imshow(lidar_mask)
+        ax4.set_title('LiDAR Mask', color='white')
+    else:
+        print(f"Warning: Could not find LiDAR mask: {lidar_mask_path}")
+    ax4.set_xticks([])
+    ax4.set_yticks([])
+
+    # 5. LiDAR projection on frame
+    ax5 = plt.subplot(235)
+    lidar_proj_path = os.path.join(base_dir, "debug", f"{frame_id}_03_lidar_mask_on_image.png")
+    if os.path.exists(lidar_proj_path):
+        lidar_proj = plt.imread(lidar_proj_path)
+        ax5.imshow(lidar_proj)
+        ax5.set_title('LiDAR Projection', color='white')
+    else:
+        print(f"Warning: Could not find LiDAR projection: {lidar_proj_path}")
+    ax5.set_xticks([])
+    ax5.set_yticks([])
+
+    # 6. Fused depth and projection
+    ax6 = plt.subplot(236)
+    fused_path = os.path.join(base_dir, "debug", f"{frame_id}_02_fused_depth.png")
+    if os.path.exists(fused_path):
+        fused_img = plt.imread(fused_path)
+        ax6.imshow(fused_img)
+        ax6.set_title('Fused Depth', color='white')
+    else:
+        print(f"Warning: Could not find fused depth image: {fused_path}")
+    ax6.set_xticks([])
+    ax6.set_yticks([])
+    
+    # Adjust layout
+    plt.tight_layout(pad=3.0)
+    
+    # Add a heading for the entire figure
+    fig.suptitle(f'Frame {frame_id} - Depth Fusion Pipeline', 
+                fontsize=16, color='white', y=1.02)
+    
+    # Save with high quality
+    plt.savefig(output_path, 
+                dpi=300, 
+                bbox_inches='tight',
+                facecolor='black',
+                edgecolor='none')
     plt.close()
 
 def create_timeline_strip(data, output_path):
@@ -1177,47 +1264,47 @@ def compare_depth_methods(base_dir):
     # 6) Qualitative Analysis
     print("\n=== Qualitative Analysis ===")
     
-    def generate_scenario_visualization(scenario_type, frame_id):
-        """Generate visualization for a specific scenario type."""
-        frame_data = {
-            'rgb': plt.imread(os.path.join(base_dir, f'debug/{frame_id}_rgb.png')),
-            'mono_depth': np.load(os.path.join(base_dir, f'debug/{frame_id}_mono_depth.npy')),
-            'fused_depth': np.load(os.path.join(base_dir, f'debug/{frame_id}_fused_depth.npy')),
-            'lidar_points': np.load(os.path.join(base_dir, f'debug/{frame_id}_lidar_projected.npy')),
-        }
-        
-        # Get detection boxes and warnings
-        obj_slice = obj_df[obj_df['frame'] == frame_id]
-        frame_data['boxes'] = obj_slice['bbox'].apply(safe_bbox).tolist()
-        frame_data['warnings'] = obj_slice['warn_stable_fused'].values
-        
-        output_path = os.path.join(output_dir, f'figure7_{scenario_type}.png')
-        create_qualitative_visualization(frame_data, output_path, scenario_type)
-        
-        # Create timeline if available
-        if len(obj_slice) > 0:
-            obj_id = obj_slice.iloc[0]['obj_id']
-            obj_history = obj_df[obj_df['obj_id'] == obj_id].sort_values('frame')
-            
-            timeline_data = {
-                'time': np.arange(len(obj_history)) / 25.0,  # Assuming 25 fps
-                'ttc': obj_history['ttc'].values,
-                'warning_state': obj_history['warn_stable_fused'].values,
-                'ttc_threshold': obj_history['T_warn'].iloc[0],
-                't_star': obj_history[obj_history['warn_stable_fused']].index[0] / 25.0
-                if any(obj_history['warn_stable_fused']) else None
-            }
-            
-            timeline_path = os.path.join(output_dir, f'timeline_{scenario_type}.png')
-            create_timeline_strip(timeline_data, timeline_path)
-    
-    # Generate visualizations for key scenarios
+    # Define key scenarios with their frame IDs
     scenarios = {
-        'fused_depth': 18050,  # Example frame showing good fusion
-        'missed_detection': 18075,  # Frame with VRU detection
-        'glare_robustness': 18100,  # High-glare scene
-        'highway_cutin': 18150,  # Fast lateral cut-in case
+        'fused_depth': '18050',      # Example frame showing good fusion
+        'missed_detection': '18075',  # Frame with VRU detection
+        'glare_robustness': '18100',  # High-glare scene
+        'highway_cutin': '18150'      # Fast lateral cut-in case
     }
+    
+    # Generate visualizations for each scenario
+    for scenario, frame_id in scenarios.items():
+        print(f"Generating visualization for {scenario}...")
+        output_path = os.path.join(output_dir, f'figure7_{scenario}.png')
+        
+        try:
+            # Generate main visualization
+            create_qualitative_visualization(base_dir, frame_id, output_path)
+            print(f"Saved visualization to: {output_path}")
+            
+            # Generate timeline visualization if we have object data
+            obj_slice = obj_df[obj_df['frame'] == frame_id]
+            if len(obj_slice) > 0:
+                obj_id = obj_slice.iloc[0]['obj_id']
+                obj_history = obj_df[obj_df['obj_id'] == obj_id].sort_values('frame')
+                
+                timeline_data = {
+                    'time': np.arange(len(obj_history)) / 25.0,  # Assuming 25 fps
+                    'ttc': obj_history['ttc'].values,
+                    'warning_state': obj_history['warn_stable_fused'].values,
+                    'ttc_threshold': obj_history['T_warn'].iloc[0],
+                    't_star': obj_history[obj_history['warn_stable_fused']].index[0] / 25.0
+                    if any(obj_history['warn_stable_fused']) else None
+                }
+                
+                timeline_path = os.path.join(output_dir, f'timeline_{scenario}.png')
+                create_timeline_strip(timeline_data, timeline_path)
+                print(f"Saved timeline to: {timeline_path}")
+                
+        except Exception as e:
+            print(f"Failed to generate {scenario} visualization: {e}")
+    
+    print("\n=== Early Collision Warning Analysis ===")
     
     for scenario, frame_id in scenarios.items():
         try:
