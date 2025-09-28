@@ -43,15 +43,15 @@ class ECWAnnotator:
         if len(self.points) == 4:
             overlay = img_copy.copy()
             pts = np.array(self.points, np.int32)
-            cv2.fillPoly(overlay, [pts], (0, 255, 0))
+            cv2.fillPoly(overlay, [pts], (255, 150, 150))  # Light blue color
             cv2.addWeighted(overlay, self.alpha, img_copy, 1 - self.alpha, 0, img_copy)
             
-            # Draw connecting lines
+            # Draw connecting lines in blue
             for i in range(4):
                 cv2.line(img_copy, 
                         tuple(map(int, self.points[i])),
                         tuple(map(int, self.points[(i+1)%4])),
-                        (0, 255, 0), 2)
+                        (255, 0, 0), 2)  # Blue color for better visibility
 
         # Draw points
         for i, point in enumerate(self.points):

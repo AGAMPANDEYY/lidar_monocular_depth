@@ -1,0 +1,8 @@
+LiDAR-Camera Projection Diagnostic Report
+=========================================
+
+Best coordinate transformation: Transform 2: [Y, X, Z]
+Original points: 23346
+After filtering: 21179
+Valid projections: 10489
+Points inside image: 9266

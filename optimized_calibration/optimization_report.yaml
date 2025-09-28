@@ -1,0 +1,42 @@
+corrections_applied:
+  cx_offset: 0
+  cy_offset: 0
+  pitch: !!python/object/apply:numpy._core.multiarray.scalar
+  - &id001 !!python/object/apply:numpy.dtype
+    args:
+    - f8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    AAAAAAAA8D8=
+  roll: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    AAAAAAAAAEA=
+  tx: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    mpmZmZmZyb8=
+  ty: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    mpmZmZmZyb8=
+  tz: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    nJmZmZmZub8=
+  yaw: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    AAAAAAAACMA=
+optimized_error_px: 21.86727914791221
+original_error_px: 41.1

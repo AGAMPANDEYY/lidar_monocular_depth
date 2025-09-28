@@ -48,6 +48,13 @@ def create_warning_plot(df, output_dir):
 
 def create_ttc_plot(df, output_dir):
     plt.figure(figsize=(10, 6))
+    # Set font globally for this plot
+    plt.rcParams['font.family'] = 'Times New Roman'
+    plt.rcParams['font.size'] = 16
+    plt.rcParams['axes.titlesize'] = 18
+    plt.rcParams['axes.labelsize'] = 16
+    plt.rcParams['xtick.labelsize'] = 14
+    plt.rcParams['ytick.labelsize'] = 14
     valid_ttc = df[np.isfinite(df['ttc'])]['ttc']
     sns.histplot(data=valid_ttc, bins=30)
     plt.title('TTC Distribution (Valid Values Only)')

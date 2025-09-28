@@ -75,7 +75,23 @@ python lidar_projection/project_lidar.py \
   --manual_cx_offset 30
 
 [LATEST]
-python lidar_projection/project_lidar.py \
+
+
+1. python lidar_projection/project_lidar.py \
+  --pcd "data/lidar/input (Frame 10981).pcd" \
+  --cam_yaml calibration/camera.yaml \
+  --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
+  --image data/frames/front/27435.png \
+  --out_npz data/processed_lidar/27435.npz \
+  --debug_overlay data/processed_lidar/27435_overlay.png \
+  --manual_cy_offset -200 \
+  --manual_cx_offset 50 \
+  --manual_roll 10 \
+  --manual_pitch -4 \
+  --manual_yaw -1
+
+
+2. python lidar_projection/project_lidar.py \
   --pcd "data/lidar/input (Frame 2745).pcd" \
   --cam_yaml calibration/camera.yaml \
   --ext_yaml calibration/extrinsics_lidar_to_cam.yaml \
@@ -207,7 +223,7 @@ python main.py --ecw_use_fused --depth_backend fastdepth --max_frames 100
 Then evaluate all results:
 
 python eval/compare_fusion.py --data_dir data/fused_output
-python Eval/save_and_visualize.py --data_dir data/fused_output
+python eval/save_and_visualize.py --data_dir data/fused_output
 python Eval/ablations.py --data_dir data/fused_output
 
 This will give you comprehensive tables showing:
@@ -227,4 +243,22 @@ python scripts/run_ablation_study.py --data_dir data/fused_output
 GENERATE FIGURES
 
 
-ython scripts/generate_paper_figures.py --frame 27425  (frame correpsodong to 18:17min)
+python scripts/generate_paper_figures.py --frame 27435  (frame correpsodong to 18:17min)
+
+
+Projection 
+
+
+python diagnostic_tool.py --cam_yaml optimized_calibration/camera_optimized.yaml --ext_yaml optimized_calibration/extrinsics_optimized.yaml --pcd "data/lidar/input (Frame 10981).pcd" --image data/frames/front/27435.png --out_npz diagnostics/output_optimized.npz --debug_overlay diagnostics/overlay_optimized.png --test_checkerboard --manual_ty 1.2 --manual_tz 0.1  --manual_pitch 0.5 --manual_yaw 2 \
+--manual_cx 2 
+
+
+python diagnostic_tool.py --cam_yaml optimized_calibration/camera_optimized.yaml --ext_yaml optimized_calibration/extrinsics_optimized.yaml --pcd "data/lidar/input (Frame 10981).pcd" --image data/frames/front/27435.png --out_npz diagnostics/output_optimized.npz --debug_overlay diagnostics/overlay_optimized.png --test_checkerboard --manual_ty 1.2 --manual_tz 0.1  --manual_pitch 0.5 --manual_yaw 1 \
+--manual_cx -6  --manual_cy 1
+
+python diagnostic_tool.py --cam_yaml optimized_calibration/camera_optimized.yaml --ext_yaml optimized_calibration/extrinsics_optimized.yaml --pcd "data/lidar/input (Frame 10981).pcd" --image data/frames/front/27435.png --out_npz diagnostics/output_optimized.npz --debug_overlay diagnostics/overlay_optimized.png --test_checkerboard --manual_ty 1.2 --manual_tz 0.1  --manual_pitch 1.9 --manual_yaw 1.2 \
+--manual_cx -5  --manual_cy 0.9
+
+TTC 
+python scripts/enhanced_ttc_processor.py --frame 27435
+

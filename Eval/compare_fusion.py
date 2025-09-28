@@ -472,7 +472,7 @@ def compare_depth_methods(base_dir):
     plt.rcParams['axes.axisbelow'] = True  # Place grid behind plots
     
     # Create output directory for plots and metrics
-    output_dir = os.path.join(os.path.dirname(__file__), 'output')
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
     os.makedirs(output_dir, exist_ok=True)
     
     def create_depth_comparison_plot(df, metric_name, ylabel, filename):
@@ -774,7 +774,7 @@ def compare_depth_methods(base_dir):
     box_df = pd.DataFrame(results)
     plt.figure(figsize=(8,5))
     sns.barplot(data=box_df, x='Range', y='MAE (m)', hue='Method')
-    plt.title('Box-Level MAE by Range')
+    plt.xlabel('Range')
     plt.ylabel('MAE (m)')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'box_mae_by_range.png'))
@@ -782,7 +782,7 @@ def compare_depth_methods(base_dir):
 
     plt.figure(figsize=(8,5))
     sns.barplot(data=box_df, x='Range', y='RMSE (m)', hue='Method')
-    plt.title('Box-Level RMSE by Range')
+    plt.xlabel('Range')
     plt.ylabel('RMSE (m)')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'box_rmse_by_range.png'))
@@ -895,7 +895,7 @@ def compare_depth_methods(base_dir):
     if not dense_df.empty:
         plt.figure(figsize=(8,5))
         sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
-        plt.title('Dense AbsRel by Range')
+        plt.xlabel('Range')
         plt.ylabel('AbsRel')
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
@@ -903,7 +903,7 @@ def compare_depth_methods(base_dir):
 
         plt.figure(figsize=(8,5))
         sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
-        plt.title('Dense RMSE by Range')
+        plt.xlabel('Range')
         plt.ylabel('RMSE (m)')
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
@@ -975,7 +975,7 @@ def compare_depth_methods(base_dir):
     obj_df = pd.read_csv(os.path.join(base_dir, 'object_depth_metrics.csv'))
     
     # Create output directory if it doesn't exist
-    output_dir = os.path.join(os.path.dirname(base_dir), 'eval_output')
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate visualizations for key scenarios
@@ -999,7 +999,7 @@ def compare_depth_methods(base_dir):
     from plot_utils import create_comparison_dashboard
     
     # Create output directory if it doesn't exist
-    output_dir = os.path.join(os.path.dirname(base_dir), 'eval_output')
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Total records: {len(obj_df)}")

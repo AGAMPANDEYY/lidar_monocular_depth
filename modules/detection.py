@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 
-CLASSES = ['Auto', 'Car', 'HV', 'LCV', 'MTW', 'Others']  # Original classes from best-e150 model
+CLASSES = ['Car', 'Auto', 'HV', 'Cycle', 'MTW', 'Others']  # Original classes from best-e150 model
 
 def load_yolo_model(weights_path):
     return YOLO(weights_path)

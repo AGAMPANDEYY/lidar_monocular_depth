@@ -196,9 +196,9 @@ def create_visualization_figures(frame_number):
     cv2.fillPoly(ecw_mask_arr, [pts], 1)
     ecw_mask = ecw_mask_arr.astype(bool)
     
-    # Show ECW region
+    # Show ECW region with more visible colors
     plt.imshow(np.ma.masked_where(~ecw_mask, np.ones_like(ecw_mask)), 
-               cmap='Greens', alpha=0.2)
+               cmap='RdBu', alpha=0.3)  # Using RdBu colormap for better visibility
     
     # Process each detection
     ttc_tracker = TTCTracker()
