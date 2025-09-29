@@ -1,3 +1,10 @@
+# Utility to load ECW zone polygon from JSON
+def load_ecw_polygon(json_path):
+    import json
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    pts = np.array(data['points'], dtype=np.int32)
+    return pts
 # Tracking constants
 TRACK_IOU_THR = 0.3
 TRACK_MAX_AGE = 5  # frames to keep an unmatched track
@@ -71,7 +78,7 @@ from modules.visualization import overlay_results
 T_WARN_VRU = 2.0  # seconds for pedestrians/bikes
 T_WARN_VEHICLE = 1.0  # seconds for vehicles
 T_WARN_DEFAULT = 1.5  # seconds for unknown objects
-T_HYSTERESIS = 0.5  # additional seconds before clearing warning
+T_HYSTERESIS = None  # will be set at runtime from args
 MIN_VALID_PIXELS = 15  # minimum valid pixels in inner patch
 MIN_PERSISTENCE_FRAMES = 3  # frames of continuous warning before triggering
 MIN_SIZE_M = {'width': 0.2, 'height': 0.2}  # minimum object size in meters
@@ -81,7 +88,7 @@ MAX_SIZE_M = {'width': 2.5, 'height': 3.0}  # maximum object size in meters
 FRAME_DIR = 'data/frames'
 LIDAR_DIR = 'data/lidar'  # Changed to match where LiDAR files actually are
 OUT_DIR   = 'data/fused_output'
-YOLO_WEIGHTS = 'detection/best-e150 (1).pt'
+YOLO_WEIGHTS = 'detection/best.pt'
 
 os.makedirs(OUT_DIR, exist_ok=True)
 DBG_DIR = os.path.join(OUT_DIR, "debug")
@@ -264,6 +271,10 @@ def print_performance_comparison(current_metrics, timing_rows):
     print(f"  Total pipeline:  {np.mean([row['t_total_ms'] for row in timing_rows]):.1f} ms")
 
 def main():
+    # Load ECW polygon coordinates from annotation file
+    ecw_json_path = 'data/ecw_annotations/ecw_frame_27435.json'
+    ecw_polygon = load_ecw_polygon(ecw_json_path)
+
     prev_tracks = {}
     next_track_id = 0
     parser = argparse.ArgumentParser(description="Camera–LiDAR fusion pipeline (debug-friendly)")
@@ -293,6 +304,17 @@ def main():
                     help='Road slope in degrees for ground plane removal')
     parser.add_argument('--flow_thresh', type=float, default=1.5,
                     help='Optical flow magnitude threshold')
+    # add near the other parser.add_argument(...) calls
+    parser.add_argument('--out_dir', default='data/fused_output', help='Output root for this run')
+    parser.add_argument('--fusion_mode', choices=['ours','late','mono','lidar'], default='ours',
+                        help='Depth map used for downstream: ours(conf+ema), simple late-fusion, mono-only, or lidar-only')
+    parser.add_argument('--ecw_source', choices=['fused','mono','lidar'], default='fused',
+                        help='Which depth map to use for ECW blob mining and TTC: fused/mono/lidar')
+    parser.add_argument('--no_ema', action='store_true', help='Disable EMA smoothing in TTC')
+    parser.add_argument('--no_mining', action='store_true', help='Disable missed-obstacle mining')
+    parser.add_argument('--no_sanity', action='store_true', help='Disable persistence/hysteresis sanity checks')
+    parser.add_argument('--hysteresis', type=float, default=0.5, help='ECW hysteresis seconds')
+
 
     args = parser.parse_args()
 
@@ -301,8 +323,16 @@ def main():
     print(f"[CFG] LiDAR  frames: {args.lidar_start} .. {args.lidar_end} @ {args.lidar_fps:.1f} fps")
     print(f"[CFG] Max frames to process: {args.max_frames}")
 
-    # Load fx from camera.yaml (for ECW etc.)
-    def _load_fx_from_yaml(path="calibration/camera.yaml"):
+    # Set output directories from CLI
+    global OUT_DIR, DBG_DIR, T_HYSTERESIS
+    OUT_DIR = args.out_dir
+    os.makedirs(OUT_DIR, exist_ok=True)
+    DBG_DIR = os.path.join(OUT_DIR, "debug")
+    os.makedirs(DBG_DIR, exist_ok=True)
+    # Set hysteresis at runtime
+    T_HYSTERESIS = args.hysteresis
+    # ...existing code...
+    def _load_fx_from_yaml(path="optimized_calibration/camera_optimized.yaml"):
         try:
             with open(path, "r") as f:
                 cam = yaml.safe_load(f)
@@ -503,8 +533,8 @@ def main():
             cmd = (
                 f"python lidar_projection/project_lidar.py "
                 f"--pcd '{lidar_path}' "
-                f"--cam_yaml calibration/camera.yaml "
-                f"--ext_yaml calibration/extrinsics_lidar_to_cam.yaml "
+                f"--cam_yaml optimized_calibration/camera_optimized.yaml "
+                f"--ext_yaml optimized_calibration/extrinsics_optimized.yaml "
                 f"--image {frame_path} "
                 f"--out_npz {out_npz} "
                 f"--debug_overlay {debug_overlay} "
@@ -615,9 +645,8 @@ def main():
 
         # ---------- Missed obstacle detection inside ECW (depth blobs not covered by YOLO) ----------
         # 3.1 ECW mask (trapezoid ahead of ego)
-        ECW_mask, ECW_poly = make_ecw_mask(
-            H, W, args.ecw_top, args.ecw_bot, args.ecw_top_w, args.ecw_bot_w
-        )
+        ECW_mask = make_ecw_mask(H, W, ecw_polygon)
+        ECW_poly = ecw_polygon
 
         # 3.2 Detected-objects mask (dilate to give YOLO some margin)
         det_mask = np.zeros((H, W), dtype=np.uint8)
@@ -1156,7 +1185,7 @@ def main():
     pd.DataFrame(comparison_rows).to_csv(comparison_path, index=False)
     
     # Print performance comparison
-    print_performance_comparison(avg_metrics)
+    print_performance_comparison(avg_metrics, timing_rows)
     
     print("\n========== DONE ==========")
     print(f"[OUT] CSV:   {csv_path}")
@@ -1273,27 +1302,15 @@ def compute_warning_state(obj_id, ttc, class_name, state_dict):
     state['last_ttc'] = ttc
     return warn_raw, state['warning_active']
 
-def make_ecw_mask(H, W, top_y, bot_y, top_w, bot_w):
+def make_ecw_mask(H, W, ecw_polygon):
     """
-    Trapezoid in front of ego: widths are fractions of W; y are fractions of H.
-    Returns boolean mask [H,W].
+    Returns boolean mask [H,W] for ECW polygon loaded from annotation.
+    ecw_polygon: np.ndarray of shape (4,2) or more, int32
     """
-    import numpy as np, cv2
-    y1 = int(top_y * H); y2 = int(bot_y * H)
-    half_top = int(0.5 * top_w * W)
-    half_bot = int(0.5 * bot_w * W)
-    cx = W // 2
-
-    poly = np.array([
-        [cx - half_top, y1],
-        [cx + half_top, y1],
-        [cx + half_bot, y2],
-        [cx - half_bot, y2],
-    ], dtype=np.int32)
-
     mask = np.zeros((H, W), dtype=np.uint8)
-    cv2.fillPoly(mask, [poly], 1)
-    return mask.astype(bool), poly
+    cv2.fillPoly(mask, [ecw_polygon], 1)
+    return mask.astype(bool)
 
 if __name__ == '__main__':
+    # Main entry point. No mask creation here; use make_ecw_mask(H, W, ecw_polygon) in your pipeline.
     main()

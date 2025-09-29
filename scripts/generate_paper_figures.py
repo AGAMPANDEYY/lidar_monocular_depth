@@ -110,7 +110,7 @@ def create_single_visualization(frame_rgb, depth_map, pred_bboxes, lidar_data=No
     ax.imshow(frame_rgb)
     depth_norm = plt.Normalize(vmin=depth_map.min(), vmax=depth_map.max())
     depth_colored = plt.cm.magma(depth_norm(depth_map))
-    depth_colored[..., 3] = 0.3
+    depth_colored[..., 3] = 0.45  # Less transparent for better visibility
     ax.imshow(depth_colored)
     # 3. Draw bounding boxes and labels
     for box in pred_bboxes:
@@ -129,9 +129,10 @@ def create_single_visualization(frame_rgb, depth_map, pred_bboxes, lidar_data=No
                 fused_depth = w_lidar * lidar_depth + w_mono * mono_depth
             else:
                 fused_depth = mono_depth
-        color = 'cyan' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
-        plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
-        # --- Accurate TTC Calculation using tracked object speed over last 75 frames ---
+    # Use a darker blue for cycle (class_idx==3), lime for person, magenta for vehicles
+        color = '#1f3b6f' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
+        ax.add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
+            # --- Accurate TTC Calculation using tracked object speed over last 75 frames ---
         ego_speed = 10.33  # m/s (replace with actual ego speed if available)
         object_speed = 0.0
         track_id = int(box[7]) if len(box) > 7 else None
@@ -164,8 +165,8 @@ def create_single_visualization(frame_rgb, depth_map, pred_bboxes, lidar_data=No
             label_lines.append(f"LiDAR: {lidar_depth:.1f}m")
         if np.isfinite(fused_depth):
             label_lines.append(f"Fused: {fused_depth:.1f}m")
-        if np.isfinite(ttc):
-            label_lines.append(f"TTC: {ttc:.1f}s")
+        #if np.isfinite(ttc):
+            #label_lines.append(f"TTC: {ttc:.1f}s")
         y_text = y1 - 5
         for line in reversed(label_lines):
             if line.startswith("TTC:"):
@@ -297,7 +298,7 @@ def create_visualization_figures(frame_number):
                 class_thresholds = {0: 8.0, 1: 5.0, 2: 12.0, 3: 5.0, 4: 10.0}
                 warn_threshold = class_thresholds.get(cls_idx, 8.0)
                 missed = in_ecw and obj_fused_depth < warn_threshold
-                color = 'red' if missed else ('cyan' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta')
+                color = 'red' if missed else ("#3ed545" if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta')
                 ax.add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
                 label = f"{CLASSES[cls_idx]} ({conf:.2f})\nFused: {obj_fused_depth:.1f}m"
                 if missed:
@@ -318,7 +319,8 @@ def create_visualization_figures(frame_number):
                 for i, label in enumerate(unique_labels):
                     blob = coords[labels == label]
                     if len(blob) > 20:
-                        color = cmap(i % 10)
+                        # Use a bright color from tab10 colormap for each blob
+                        color = plt.get_cmap('tab10')(i % 10)
                         ax.scatter(blob[:,0], blob[:,1], c=[color], s=12, alpha=0.7, label=f'Missed Blob {n_blobs+1}')
                         n_blobs += 1
                 if n_blobs > 0:
@@ -565,19 +567,21 @@ def create_visualization_figures(frame_number):
         x1, y1, x2, y2 = map(int, box[:4])
         cls_idx = int(box[4])
         conf = float(box[5])
-        color = 'cyan' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
+        color = '#1f3b6f' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
         plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
         # Only show averaged TTC for all boxes
         label = f"TTC (avg): {avg_ttc:.1f}s" if np.isfinite(avg_ttc) else "TTC: N/A"
         plt.text(x1, y1-10, label, color='black', fontsize=10,
-                 bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+             bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
         cls_idx = int(box[4])
         conf = float(box[5])
         
         # Color based on class
-        if cls_idx in [1, 3]:  # Person or bike
-            color = 'cyan' if cls_idx == 3 else 'lime'
-        else:  # Vehicles
+        if cls_idx == 3:
+            color = '#1f3b6f'  # Darker blue for cycle
+        elif cls_idx == 1:
+            color = 'lime'
+        else:
             color = 'magenta'
         
         # Draw box and label
@@ -596,7 +600,7 @@ def create_visualization_figures(frame_number):
     # Create depth overlay with transparency
     depth_norm = plt.Normalize(vmin=depth_map.min(), vmax=depth_map.max())
     depth_colored = plt.cm.magma(depth_norm(depth_map))
-    depth_colored[..., 3] = 0.5  # Set alpha for transparency
+    depth_colored[..., 3] = 0.45  # Less transparent for better visibility
     depth_img = plt.imshow(depth_colored)
     
     # Add detection boxes and depth values
@@ -649,6 +653,23 @@ def create_visualization_figures(frame_number):
         plt.savefig(path, dpi=dpi, **kwargs)
 
     # --- Visualization routines ---
+    def safe_savefig(path, dpi=300, **kwargs):
+        """Safely save figure by capping size to avoid matplotlib limits."""
+        fig = plt.gcf()
+        w_inches, h_inches = fig.get_size_inches()
+        max_pixels = 65535
+        w_pixels = w_inches * dpi
+        h_pixels = h_inches * dpi
+        if w_pixels > max_pixels or h_pixels > max_pixels:
+            scale_w = max_pixels / w_pixels if w_pixels > max_pixels else 1.0
+            scale_h = max_pixels / h_pixels if h_pixels > max_pixels else 1.0
+            scale = min(scale_w, scale_h)
+            new_w = w_inches * scale
+            new_h = h_inches * scale
+            print(f"Warning: Figure too large ({w_pixels:.0f}x{h_pixels:.0f}). Resizing to ({new_w*dpi:.0f}x{new_h*dpi:.0f})")
+            fig.set_size_inches(new_w, new_h)
+        plt.savefig(path, dpi=dpi, **kwargs)
+
     def create_mono_depth_visualization(frame_rgb, depth_map, pred_bboxes, figures_dir, frame_number, dpi=300):
         """Create monocular depth visualization with proper size management."""
         plt.figure(figsize=(15, 8))  # Fixed reasonable size
@@ -660,14 +681,14 @@ def create_visualization_figures(frame_number):
         plt.imshow(frame_rgb)
         depth_norm = plt.Normalize(vmin=depth_map.min(), vmax=depth_map.max())
         depth_colored = plt.cm.magma(depth_norm(depth_map))
-        depth_colored[..., 3] = 0.5
+        depth_colored[..., 3] = 0.5  # Set alpha for transparency
         depth_img = plt.imshow(depth_colored)
         for box in pred_bboxes:
             x1, y1, x2, y2 = map(int, box[:4])
             cls_idx = int(box[4])
             conf = float(box[5])
             box_depth = np.median(depth_map[y1:y2, x1:x2])
-            color = 'cyan' if cls_idx == 3 else ('lime' if cls_idx == 1 else 'magenta')
+            color = '#1f3b6f' if cls_idx == 3 else ('lime' if cls_idx == 1 else 'magenta')
             plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
             label = f"{CLASSES[cls_idx]}\nDepth: {box_depth:.1f}m"
             plt.text(x1, y1-10, label, color=color, fontsize=8,

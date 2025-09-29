@@ -488,7 +488,7 @@ def create_enhanced_ttc_visualization(target_frame):
     ax2.imshow(frame_rgb)
     for i, box in enumerate(pred_bboxes):
         x1, y1, x2, y2, cls_idx, conf = box
-        color = 'cyan' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
+        color = '#1f3b6f' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
         ax2.add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
         ax2.text(x1, y1-10, f"Box {i}: {CLASSES[cls_idx]}", color=color, fontsize=10,
                  bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
@@ -537,7 +537,7 @@ def create_enhanced_ttc_visualization(target_frame):
                     fused_depth = 0.8 * lidar_depth + 0.2 * mono_depth
             except Exception as e:
                 pass
-        color = 'cyan' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
+        color = '#1f3b6f' if cls_idx == 3 else 'lime' if cls_idx == 1 else 'magenta'
         ax.add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, color=color, linewidth=2))
         label_lines = [
             f"{CLASSES[cls_idx]} ({conf:.2f})",

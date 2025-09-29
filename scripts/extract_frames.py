@@ -129,7 +129,6 @@ def draw_rois_debug(img, rois, names=VIEW_NAMES_DEFAULT, out_path=None):
     colors = [(0,255,0),(0,200,255),(255,200,0),(255,0,0)]
     for i, (x1,y1,x2,y2) in enumerate(rois):
         cv2.rectangle(vis, (x1,y1), (x2,y2), colors[i%4], 2)
-        cv2.putText(vis, names[i], (x1+6,y1+24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, colors[i%4], 2, cv2.LINE_AA)
     if out_path:
         cv2.imwrite(out_path, vis)
         print("Wrote", out_path)

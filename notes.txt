@@ -238,6 +238,16 @@ Object-level depth statistics
 ABLATION STUDIES 
 
 python scripts/run_ablation_study.py --data_dir data/fused_output
+python eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --max_frames 300 \
+  --fps 25 --lidar_fps 10 \
+  --depth_backend midas \
+  --camera_start 18000 --camera_end 21000 \
+  --lidar_start 7206 --lidar_end 8406 \
+  --hysteresis 0.5
 
 
 GENERATE FIGURES

@@ -2,7 +2,16 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 
-CLASSES = ['Car', 'Auto', 'HV', 'Cycle', 'MTW', 'Others']  # Original classes from best-e150 model
+CLASSES = [
+    'Car',
+    'MTW',
+    'HV',
+    'Pedestrians',
+    'Rickshaw',
+    'LCV',
+    'Cycle',
+    'Others'
+]  # Updated to match your trained class order
 
 def load_yolo_model(weights_path):
     return YOLO(weights_path)
@@ -19,7 +28,10 @@ def run_obstacle_detection(img, model, conf_thresh=0.2):  # Lowered threshold
             x1, y1, x2, y2 = box.xyxy[0]
             conf = box.conf[0]
             cls = int(box.cls[0])
-            print(f"- Class: {CLASSES[cls]}, Confidence: {conf:.2f}")
+            if 0 <= cls < len(CLASSES):
+                print(f"- Class: {CLASSES[cls]}, Confidence: {conf:.2f}")
+            else:
+                print(f"- Class index {cls} out of range! Confidence: {conf:.2f}")
             if conf > conf_thresh:
                 pred_bboxes.append([x1, y1, x2, y2, cls, conf])
                 print(f"  Added to results (above threshold {conf_thresh})")
