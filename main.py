@@ -1,3 +1,5 @@
+
+
 # Utility to load ECW zone polygon from JSON
 def load_ecw_polygon(json_path):
     import json
@@ -58,6 +60,8 @@ import time
 import psutil
 from glob import glob
 
+sys.path.append("/kaggle/working/Kaggle")
+
 import numpy as np
 import pandas as pd
 import cv2
@@ -85,10 +89,16 @@ MIN_SIZE_M = {'width': 0.2, 'height': 0.2}  # minimum object size in meters
 MAX_SIZE_M = {'width': 2.5, 'height': 3.0}  # maximum object size in meters
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-FRAME_DIR = 'data/frames'
-LIDAR_DIR = 'data/lidar'  # Changed to match where LiDAR files actually are
-OUT_DIR   = 'data/fused_output'
-YOLO_WEIGHTS = 'detection/best.pt'
+# FRAME_DIR = 'data/frames'
+# LIDAR_DIR = 'data/lidar'  # Changed to match where LiDAR files actually are
+# OUT_DIR   = 'data/fused_output'
+# YOLO_WEIGHTS = 'detection/best.pt'
+FRAME_DIR    = '/kaggle/input/lidar-cam/lidar_monocular_depth/data/frames'
+LIDAR_DIR    = '/kaggle/input/lidar-cam/lidar_monocular_depth/data/lidar'
+OUT_DIR      = '/kaggle/working/fused_output'
+YOLO_WEIGHTS = '/kaggle/input/lidar-cam/lidar_monocular_depth/data/best.pt'
+
+
 
 os.makedirs(OUT_DIR, exist_ok=True)
 DBG_DIR = os.path.join(OUT_DIR, "debug")
