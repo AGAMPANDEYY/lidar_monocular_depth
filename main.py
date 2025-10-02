@@ -342,7 +342,7 @@ def main():
     # Set hysteresis at runtime
     T_HYSTERESIS = args.hysteresis
     # ...existing code...
-    def _load_fx_from_yaml(path="optimized_calibration/camera_optimized.yaml"):
+    def _load_fx_from_yaml(path="/kaggle/working/lidar_monocular_depth/optimized_calibration/camera_optimized.yaml"):
         try:
             with open(path, "r") as f:
                 cam = yaml.safe_load(f)
