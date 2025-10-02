@@ -282,7 +282,7 @@ def print_performance_comparison(current_metrics, timing_rows):
 
 def main():
     # Load ECW polygon coordinates from annotation file
-    ecw_json_path = 'data/ecw_annotations/ecw_frame_27435.json'
+    ecw_json_path = '/kaggle/input/lidar-cam/lidar_monocular_depth/data/ecw_annotations/ecw_frame_27435.json'
     ecw_polygon = load_ecw_polygon(ecw_json_path)
 
     prev_tracks = {}
