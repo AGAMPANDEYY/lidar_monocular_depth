@@ -543,8 +543,8 @@ def main():
             cmd = (
                 f"python /kaggle/working/lidar_monocular_depth/lidar_projection/project_lidar.py "
                 f"--pcd '{lidar_path}' "
-                f"--cam_yaml optimized_calibration/camera_optimized.yaml "
-                f"--ext_yaml optimized_calibration/extrinsics_optimized.yaml "
+                f"--cam_yaml /kaggle/working/lidar_monocular_depth/optimized_calibration/camera_optimized.yaml "
+                f"--ext_yaml /kaggle/working/lidar_monocular_depth/optimized_calibration/extrinsics_optimized.yaml "
                 f"--image {frame_path} "
                 f"--out_npz {out_npz} "
                 f"--debug_overlay {debug_overlay} "
