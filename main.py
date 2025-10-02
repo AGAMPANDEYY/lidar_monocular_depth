@@ -541,7 +541,7 @@ def main():
             out_npz = os.path.join(LIDAR_DIR, f"{frame_id}.npz")
             debug_overlay = os.path.join(LIDAR_DIR, f"{frame_id}_overlay.png")
             cmd = (
-                f"python lidar_projection/project_lidar.py "
+                f"python /kaggle/working/lidar_monocular_depth/lidar_projection/project_lidar.py "
                 f"--pcd '{lidar_path}' "
                 f"--cam_yaml optimized_calibration/camera_optimized.yaml "
                 f"--ext_yaml optimized_calibration/extrinsics_optimized.yaml "
