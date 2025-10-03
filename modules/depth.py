@@ -88,7 +88,7 @@ def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_he
 #     depth_map = pred.squeeze().cpu().numpy()
                                      #     return depth_map
 from modules.depth_anything_v2.dpt import DepthAnythingV2
-
+from transformers import DPTImageProcessor
 def load_depth_anything_v2(
     checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/checkpoints/depth_anything_v2_vitb.pth"
 ):
