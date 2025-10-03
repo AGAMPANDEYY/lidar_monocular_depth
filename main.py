@@ -60,7 +60,7 @@ import time
 import psutil
 from glob import glob
 
-sys.path.append("/kaggle/working/Kaggle")
+sys.path.append("/kaggle/working/new_model")
 
 import numpy as np
 import pandas as pd
