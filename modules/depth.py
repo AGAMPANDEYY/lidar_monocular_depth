@@ -3,6 +3,46 @@ import torch
 import cv2
 import numpy as np
 from typing import Tuple, Any
+# ---------- Monodepth2 ----------
+def load_monodepth2(model_dir="weights/monodepth2", device=None):
+    import torch
+    from monodepth2 import networks
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load encoder
+    encoder = networks.ResnetEncoder(18, False)
+    loaded_dict_enc = torch.load(f"{model_dir}/encoder.pth", map_location=device)
+    filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in encoder.state_dict()}
+    encoder.load_state_dict(filtered_dict_enc)
+    encoder.to(device).eval()
+
+    # Load depth decoder
+    depth_decoder = networks.DepthDecoder(num_ch_enc=encoder.num_ch_enc, scales=range(4))
+    loaded_dict = torch.load(f"{model_dir}/depth.pth", map_location=device)
+    depth_decoder.load_state_dict(loaded_dict)
+    depth_decoder.to(device).eval()
+
+    def runner(img_bgr):
+        import cv2, numpy as np
+        h, w = img_bgr.shape[:2]
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (1024, 320))  # trained resolution
+        input_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
+        input_tensor = input_tensor.unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            features = encoder(input_tensor)
+            outputs = depth_decoder(features)
+            disp = outputs[("disp", 0)]
+            disp_resized = torch.nn.functional.interpolate(
+                disp, (h, w), mode="bilinear", align_corners=False
+            )
+        depth_map = disp_resized.squeeze().cpu().numpy()
+        return depth_map
+
+    return runner, device, "monodepth2"
 #----Depth_Anything(V2)------
 
 def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Small"):
@@ -136,6 +176,9 @@ def load_depth_backend(backend: str = "zoe"):
     elif backend == "depth-anything-v2":
         model, proc, device = load_depth_anything_v2()
         runner = lambda img: run_depth_anything_v2(img, model, proc, device)
-        return runner, device, "depth-anything-v2"   
+        return runner, device, "depth-anything-v2" 
+    elif backend == "monodepth2":
+        runner, device, name = load_monodepth2()
+        return runner, device, name
     else:
         raise ValueError(f"Unknown backend '{backend}'. Use 'zoe' or 'midas'.")
