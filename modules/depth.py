@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 from typing import Tuple, Any
 import sys
+sys.path.append("/kaggle/working/new_model")
+
 # ---------- Monodepth2 ----------
 def load_monodepth2(model_dir="weights/monodepth2/mono+stereo_640x192"):
     import torch
