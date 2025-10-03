@@ -133,6 +133,9 @@ def load_depth_backend(backend: str = "zoe"):
         runner = lambda img: run_fastdepth_onnx(img, sess, in_name, out_name, nchw, target_hw)
         device = "cpu"
         return runner, device, "fastdepth"
-    elif backend == ""    
+    elif backend == "depth-anything-v2":
+        model, proc, device = load_depth_anything_v2()
+        runner = lambda img: run_depth_anything_v2(img, model, proc, device)
+        return runner, device, "depth-anything-v2"   
     else:
         raise ValueError(f"Unknown backend '{backend}'. Use 'zoe' or 'midas'.")
