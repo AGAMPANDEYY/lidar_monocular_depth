@@ -133,36 +133,66 @@ def load_depth_anything_v2(
     return model, processor, device
 
 # ---------- Run inference ----------
+
 def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
     h_orig, w_orig = img.shape[:2]
     
-    # Convert to RGB
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
+    
     # Make height and width multiples of 14
     patch_size = 14
     new_h = (h_orig // patch_size) * patch_size
     new_w = (w_orig // patch_size) * patch_size
     rgb_resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    # Preprocess using processor -> tensor
+    
+    # Convert to tensor
     tensor_input = processor(images=rgb_resized, return_tensors="pt").pixel_values.to(device)
-
-    # Forward pass
+    
     with torch.no_grad():
-        pred = model(tensor_input)  # Pass tensor directly
-        # Upsample to resized image
+        pred = model(tensor_input)  # [B, H', W']
+        
+        # If pred is [B, 1, H', W'] or [B, H', W'], squeeze properly
+        if pred.ndim == 4:  # [B,1,H,W]
+            pred = pred.squeeze(1)  # -> [B,H,W]
+        
         pred = torch.nn.functional.interpolate(
-            pred.unsqueeze(1), size=(new_h, new_w), mode="bilinear", align_corners=False
-        ).squeeze(1)
-
-        # Resize back to original image size
-        pred = torch.nn.functional.interpolate(
-            pred.unsqueeze(0), size=(h_orig, w_orig), mode="bilinear", align_corners=False
-        ).squeeze(0)
-
-    depth_map = pred.cpu().numpy()  # final shape [H,W]
+            pred, size=(h_orig, w_orig), mode="bilinear", align_corners=False
+        )
+    
+    depth_map = pred[0].cpu().numpy()  # take first batch, shape [H,W]
     return depth_map
+
+
+# def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
+#     h_orig, w_orig = img.shape[:2]
+    
+#     # Convert to RGB
+#     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+#     # Make height and width multiples of 14
+#     patch_size = 14
+#     new_h = (h_orig // patch_size) * patch_size
+#     new_w = (w_orig // patch_size) * patch_size
+#     rgb_resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+#     # Preprocess using processor -> tensor
+#     tensor_input = processor(images=rgb_resized, return_tensors="pt").pixel_values.to(device)
+
+#     # Forward pass
+#     with torch.no_grad():
+#         pred = model(tensor_input)  # Pass tensor directly
+#         # Upsample to resized image
+#         pred = torch.nn.functional.interpolate(
+#             pred.unsqueeze(1), size=(new_h, new_w), mode="bilinear", align_corners=False
+#         ).squeeze(1)
+
+#         # Resize back to original image size
+#         pred = torch.nn.functional.interpolate(
+#             pred.unsqueeze(0), size=(h_orig, w_orig), mode="bilinear", align_corners=False
+#         ).squeeze(0)
+
+#     depth_map = pred.cpu().numpy()  # final shape [H,W]
+#     return depth_map
 
 
 # def load_depth_anything_v2(
