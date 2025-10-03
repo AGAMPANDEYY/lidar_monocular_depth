@@ -89,6 +89,17 @@ def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_he
                                      #     return depth_map
 from modules.depth_anything_v2.dpt import DepthAnythingV2
 from transformers import DPTImageProcessor
+import math
+
+# ---------- Helper: resize/pad to multiple of patch size ----------
+def resize_to_multiple(img: np.ndarray, multiple: int = 14):
+    h, w = img.shape[:2]
+    new_h = math.ceil(h / multiple) * multiple
+    new_w = math.ceil(w / multiple) * multiple
+    img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    return img_resized
+
+# ---------- Load model ----------
 def load_depth_anything_v2(
     checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/checkpoints/depth_anything_v2_vitb.pth"
 ):
@@ -102,11 +113,11 @@ def load_depth_anything_v2(
     state_dict = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(state_dict)
     model.eval()
-    
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
 
-    # Processor (DPT-style preprocessing)
+    # Processor (DPT-style)
     processor = DPTImageProcessor(
         do_resize=True,
         size={"height": 518, "width": 518},
@@ -115,48 +126,108 @@ def load_depth_anything_v2(
         rescale_factor=1/255.0,
         do_normalize=True,
         image_mean=[0.485, 0.456, 0.406],
-        image_std=[0.229, 0.224, 0.225]
+        image_std=[0.229, 0.224, 0.225],
+        ensure_multiple_of=14
     )
 
     return model, processor, device
 
-
-
+# ---------- Run inference ----------
 def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
-    h, w = img.shape[:2]
+    h_orig, w_orig = img.shape[:2]
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # Get tensor from processor
-    inputs = processor(images=rgb, return_tensors="pt")
+    # Resize to multiple of 14 (ViT patch size)
+    rgb_resized = resize_to_multiple(rgb, multiple=14)
+
+    # Convert to tensor
+    inputs = processor(images=rgb_resized, return_tensors="pt")
     tensor_input = inputs["pixel_values"].to(device)
 
+    # Forward pass
     with torch.no_grad():
-        pred = model(tensor_input)  # pass tensor directly
+        pred = model(tensor_input)  # shape [B, H', W']
+        # Upsample to resized image
         pred = torch.nn.functional.interpolate(
-            pred.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
+            pred.unsqueeze(1), size=rgb_resized.shape[:2], mode="bilinear", align_corners=False
         ).squeeze(1)
+        # Resize back to original image size
+        pred = torch.nn.functional.interpolate(
+            pred.unsqueeze(0), size=(h_orig, w_orig), mode="bilinear", align_corners=False
+        ).squeeze(0)
 
-    depth_map = pred.squeeze().cpu().numpy()
+    depth_map = pred.cpu().numpy()
     return depth_map
 
-# ---------- MiDaS ----------
-def load_midas_model():
-    midas = torch.hub.load('intel-isl/MiDaS', 'DPT_Hybrid')
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    midas.to(device).eval()
-    transforms = torch.hub.load('intel-isl/MiDaS', 'transforms')
-    transform = transforms.dpt_transform
-    return midas, transform, device
 
-def run_midas_depth(img: np.ndarray, midas: Any, transform: Any, device: str) -> np.ndarray:
-    input_batch = transform(img).to(device)
-    with torch.no_grad():
-        pred = midas(input_batch)
-        pred = torch.nn.functional.interpolate(
-            pred.unsqueeze(1), size=img.shape[:2], mode="bicubic", align_corners=False
-        ).squeeze(1)
-    depth_map = pred.squeeze().cpu().numpy()
-    return depth_map
+# def load_depth_anything_v2(
+#     checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/checkpoints/depth_anything_v2_vitb.pth"
+# ):
+#     # Initialize model
+#     model = DepthAnythingV2(
+#         encoder='vitb',
+#         features=128,
+#         out_channels=[96, 192, 384, 768]
+#     )
+#     # Load weights
+#     state_dict = torch.load(checkpoint_path, map_location='cpu')
+#     model.load_state_dict(state_dict)
+#     model.eval()
+    
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#     model.to(device)
+
+#     # Processor (DPT-style preprocessing)
+#     processor = DPTImageProcessor(
+#         do_resize=True,
+#         size={"height": 518, "width": 518},
+#         keep_aspect_ratio=True,
+#         do_rescale=True,
+#         rescale_factor=1/255.0,
+#         do_normalize=True,
+#         image_mean=[0.485, 0.456, 0.406],
+#         image_std=[0.229, 0.224, 0.225]
+#     )
+
+#     return model, processor, device
+
+
+
+# def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
+#     h, w = img.shape[:2]
+#     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+#     # Get tensor from processor
+#     inputs = processor(images=rgb, return_tensors="pt")
+#     tensor_input = inputs["pixel_values"].to(device)
+
+#     with torch.no_grad():
+#         pred = model(tensor_input)  # pass tensor directly
+#         pred = torch.nn.functional.interpolate(
+#             pred.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
+#         ).squeeze(1)
+
+#     depth_map = pred.squeeze().cpu().numpy()
+#     return depth_map
+
+# # ---------- MiDaS ----------
+# def load_midas_model():
+#     midas = torch.hub.load('intel-isl/MiDaS', 'DPT_Hybrid')
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#     midas.to(device).eval()
+#     transforms = torch.hub.load('intel-isl/MiDaS', 'transforms')
+#     transform = transforms.dpt_transform
+#     return midas, transform, device
+
+# def run_midas_depth(img: np.ndarray, midas: Any, transform: Any, device: str) -> np.ndarray:
+#     input_batch = transform(img).to(device)
+#     with torch.no_grad():
+#         pred = midas(input_batch)
+#         pred = torch.nn.functional.interpolate(
+#             pred.unsqueeze(1), size=img.shape[:2], mode="bicubic", align_corners=False
+#         ).squeeze(1)
+#     depth_map = pred.squeeze().cpu().numpy()
+#     return depth_map
 
 # ---------- ZoeDepth (Hugging Face Transformers) ----------
 # Model card: Intel/zoedepth-nyu-kitti; classes: ZoeDepthForDepthEstimation + AutoImageProcessor
