@@ -84,27 +84,39 @@ def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_he
 
 #     depth_map = pred.squeeze().cpu().numpy()
                                      #     return depth_map
-from transformers import AutoModelForDepthEstimation, DPTImageProcessor
-import json
+from modules.depth_anything_v2.dpt import DepthAnythingV2
 
-def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base",
-                            preprocessor_json: str = None):
-    
-    # Load model
-    model = AutoModelForDepthEstimation.from_pretrained(model_id)
-    
-    # Load processor
-    if preprocessor_json:
-        with open(preprocessor_json, "r") as f:
-            config = json.load(f)
-        processor = DPTImageProcessor(**config)
-    else:
-        processor = DPTImageProcessor.from_pretrained(model_id)
+def load_depth_anything_v2(
+    checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/modules/depth_anything_v2_vitb.pth"
+):
+    # Initialize model
+    model = DepthAnythingV2(
+        encoder='vitb',
+        features=128,
+        out_channels=[96, 192, 384, 768]
+    )
+    # Load weights
+    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    model.load_state_dict(state_dict)
+    model.eval()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model.to(device).eval()
-    
+    model.to(device)
+
+    # Processor (DPT-style preprocessing)
+    processor = DPTImageProcessor(
+        do_resize=True,
+        size={"height": 518, "width": 518},
+        keep_aspect_ratio=True,
+        do_rescale=True,
+        rescale_factor=1/255.0,
+        do_normalize=True,
+        image_mean=[0.485, 0.456, 0.406],
+        image_std=[0.229, 0.224, 0.225]
+    )
+
     return model, processor, device
+
 
 
 def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
@@ -222,7 +234,7 @@ def load_depth_backend(backend: str = "zoe"):
         device = "cpu"
         return runner, device, "fastdepth"
     elif backend == "depth-anything-v2":
-        model, proc, device = load_depth_anything_v2(preprocessor_json="/kaggle/working/lidar_monocular_depth/modules/preprocessor_config.json")
+        model, proc, device = load_depth_anything_v2()
         runner = lambda img: run_depth_anything_v2(img, model, proc, device)
         return runner, device, "depth-anything-v2" 
     elif backend == "monodepth2":
