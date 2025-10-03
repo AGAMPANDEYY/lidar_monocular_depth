@@ -185,7 +185,7 @@ def load_depth_backend(backend: str = "zoe"):
         model, proc, device = load_depth_anything_v2()
         runner = lambda img: run_depth_anything_v2(img, model, proc, device)
         return runner, device, "depth-anything-v2" 
-   elif backend == "monodepth2":
+    elif backend == "monodepth2":
         encoder, depth_decoder, device, H, W = load_monodepth2()
         runner = lambda img: run_monodepth2(img, encoder, depth_decoder, device, H, W)
         return runner, device, "monodepth2"
