@@ -45,7 +45,7 @@ def load_monodepth2(model_dir="weights/monodepth2", device=None):
     return runner, device, "monodepth2"
 #----Depth_Anything(V2)------
 
-def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Small"):
+def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base"):
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
 
