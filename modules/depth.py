@@ -145,12 +145,12 @@ def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.
     new_w = (w_orig // patch_size) * patch_size
     rgb_resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-    # Preprocess
-    inputs = processor(images=rgb_resized, return_tensors="pt").to(device)
+    # Preprocess using processor -> tensor
+    tensor_input = processor(images=rgb_resized, return_tensors="pt").pixel_values.to(device)
 
     # Forward pass
     with torch.no_grad():
-        pred = model(inputs)  # Pass tensor as input (DepthAnythingV2 expects [B,C,H,W])
+        pred = model(tensor_input)  # Pass tensor directly
         # Upsample to resized image
         pred = torch.nn.functional.interpolate(
             pred.unsqueeze(1), size=(new_h, new_w), mode="bilinear", align_corners=False
