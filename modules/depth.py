@@ -222,7 +222,7 @@ def load_depth_backend(backend: str = "zoe"):
         device = "cpu"
         return runner, device, "fastdepth"
     elif backend == "depth-anything-v2":
-        model, proc, device = load_depth_anything_v2(preprocessor_json="preprocessor_config.json")
+        model, proc, device = load_depth_anything_v2(preprocessor_json="/kaggle/working/lidar_monocular_depth/modules/preprocessor_config.json")
         runner = lambda img: run_depth_anything_v2(img, model, proc, device)
         return runner, device, "depth-anything-v2" 
     elif backend == "monodepth2":
