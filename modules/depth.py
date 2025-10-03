@@ -54,13 +54,15 @@ def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_he
 #----Depth_Anything(V2)------
 
 def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base"):
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation ,AutoFeatureExtractor
 
+    model_id = "depth-anything/Depth-Anything-V2-Base"
+    model = AutoFeatureExtractor.from_pretrained(model_id)
 
     # model = AutoModelForDepthEstimation.from_pretrained(model_id)
 
     processor = AutoImageProcessor.from_pretrained(model_id)
-    model = AutoModelForDepthEstimation.from_pretrained(model_id)
+    # model = AutoModelForDepthEstimation.from_pretrained(model_id)
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device).eval()
