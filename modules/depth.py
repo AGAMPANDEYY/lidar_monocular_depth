@@ -3,6 +3,7 @@ import torch
 import cv2
 import numpy as np
 from typing import Tuple, Any
+import sys
 # ---------- Monodepth2 ----------
 def load_monodepth2(model_dir="weights/monodepth2/mono+stereo_640x192"):
     import torch
@@ -87,7 +88,7 @@ def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_he
 from modules.depth_anything_v2.dpt import DepthAnythingV2
 
 def load_depth_anything_v2(
-    checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/modules/depth_anything_v2_vitb.pth"
+    checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/checkpoints/depth_anything_v2_vitb.pth"
 ):
     # Initialize model
     model = DepthAnythingV2(
