@@ -3,6 +3,37 @@ import torch
 import cv2
 import numpy as np
 from typing import Tuple, Any
+#----Depth_Anything(V2)------
+
+def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Small"):
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+
+    # model = AutoModelForDepthEstimation.from_pretrained(model_id)
+
+    processor = AutoImageProcessor.from_pretrained(model_id)
+    model = AutoModelForDepthEstimation.from_pretrained(model_id)
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model.to(device).eval()
+    return model, processor, device
+
+
+def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
+    h, w = img.shape[:2]
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    inputs = processor(images=rgb, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        pred = outputs.predicted_depth  # [B, H', W']
+
+        pred = torch.nn.functional.interpolate(
+            pred.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
+        ).squeeze(1)
+
+    depth_map = pred.squeeze().cpu().numpy()
+    return depth_map
 
 # ---------- MiDaS ----------
 def load_midas_model():
@@ -102,5 +133,6 @@ def load_depth_backend(backend: str = "zoe"):
         runner = lambda img: run_fastdepth_onnx(img, sess, in_name, out_name, nchw, target_hw)
         device = "cpu"
         return runner, device, "fastdepth"
+    elif backend == ""    
     else:
         raise ValueError(f"Unknown backend '{backend}'. Use 'zoe' or 'midas'.")
