@@ -394,7 +394,7 @@ def main():
         frame_num = int(norm_stem(stem))
         if min_frame <= frame_num <= max_frame:
             lidar_index[str(frame_num)] = p
-            print(f"[DEBUG] Added NPZ: {stem} → {frame_num}")
+            #print(f"[DEBUG] Added NPZ: {stem} → {frame_num}")
 
     for p in glob(os.path.join(LIDAR_DIR, '*.pcd')):
         stem = os.path.splitext(os.path.basename(p))[0]
