@@ -126,18 +126,19 @@ def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.
     h, w = img.shape[:2]
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    inputs = processor(images=rgb, return_tensors="pt").to(device)
-    
-    with torch.no_grad():
-        outputs = model(**inputs)
-        pred = outputs.predicted_depth  # [B, H', W']
+    # Get tensor from processor
+    inputs = processor(images=rgb, return_tensors="pt")
+    tensor_input = inputs["pixel_values"].to(device)
 
+    with torch.no_grad():
+        pred = model(tensor_input)  # pass tensor directly
         pred = torch.nn.functional.interpolate(
             pred.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
         ).squeeze(1)
 
     depth_map = pred.squeeze().cpu().numpy()
     return depth_map
+
 # ---------- MiDaS ----------
 def load_midas_model():
     midas = torch.hub.load('intel-isl/MiDaS', 'DPT_Hybrid')
