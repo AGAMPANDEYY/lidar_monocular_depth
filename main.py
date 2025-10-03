@@ -296,7 +296,7 @@ def main():
     parser.add_argument('--lidar_fps',    type=float, default=10.0)
     parser.add_argument('--max_frames',   type=int,   default=10,  help='Process at most N frames')
     parser.add_argument('--depth_backend', type=str, default='midas',
-                    choices=['fastdepth','zoe', 'midas',"depth-anything-v2"],
+                    choices=['fastdepth','zoe', 'midas',"depth-anything-v2","monodepth2"],
                     help="Monocular depth backend: 'zoe' (HuggingFace) or 'midas' or 'fastdepth'")
     parser.add_argument('--ecw_top',   type=float, default=0.55, help='ECW top y (0..1 of H)')
     parser.add_argument('--ecw_bot',   type=float, default=0.95, help='ECW bottom y (0..1 of H)')
