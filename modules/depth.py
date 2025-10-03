@@ -53,19 +53,57 @@ def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_he
     return depth_map    
 #----Depth_Anything(V2)------
 
-def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base"):
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation ,AutoFeatureExtractor
+# def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base"):
+#     from transformers import AutoImageProcessor, AutoModelForDepthEstimation ,AutoFeatureExtractor
 
-    model_id = "depth-anything/Depth-Anything-V2-Base"
-    model = AutoFeatureExtractor.from_pretrained(model_id)
+#     model_id = "depth-anything/Depth-Anything-V2-Base"
+#     model = AutoFeatureExtractor.from_pretrained(model_id)
 
-    # model = AutoModelForDepthEstimation.from_pretrained(model_id)
+#     # model = AutoModelForDepthEstimation.from_pretrained(model_id)
 
-    processor = AutoImageProcessor.from_pretrained(model_id)
-    # model = AutoModelForDepthEstimation.from_pretrained(model_id)
+#     processor = AutoImageProcessor.from_pretrained(model_id)
+#     # model = AutoModelForDepthEstimation.from_pretrained(model_id)
+    
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#     model.to(device).eval()
+#     return model, processor, device
+
+
+# def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
+#     h, w = img.shape[:2]
+#     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+#     inputs = processor(images=rgb, return_tensors="pt").to(device)
+#     with torch.no_grad():
+#         outputs = model(**inputs)
+#         pred = outputs.predicted_depth  # [B, H', W']
+
+#         pred = torch.nn.functional.interpolate(
+#             pred.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
+#         ).squeeze(1)
+
+#     depth_map = pred.squeeze().cpu().numpy()
+                                     #     return depth_map
+from transformers import AutoModelForDepthEstimation, DPTImageProcessor
+import json
+
+def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base",
+                            preprocessor_json: str = None):
+    
+    # Load model
+    model = AutoModelForDepthEstimation.from_pretrained(model_id)
+    
+    # Load processor
+    if preprocessor_json:
+        with open(preprocessor_json, "r") as f:
+            config = json.load(f)
+        processor = DPTImageProcessor(**config)
+    else:
+        processor = DPTImageProcessor.from_pretrained(model_id)
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device).eval()
+    
     return model, processor, device
 
 
@@ -74,6 +112,7 @@ def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     inputs = processor(images=rgb, return_tensors="pt").to(device)
+    
     with torch.no_grad():
         outputs = model(**inputs)
         pred = outputs.predicted_depth  # [B, H', W']
@@ -84,7 +123,6 @@ def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.
 
     depth_map = pred.squeeze().cpu().numpy()
     return depth_map
-
 # ---------- MiDaS ----------
 def load_midas_model():
     midas = torch.hub.load('intel-isl/MiDaS', 'DPT_Hybrid')
@@ -184,7 +222,7 @@ def load_depth_backend(backend: str = "zoe"):
         device = "cpu"
         return runner, device, "fastdepth"
     elif backend == "depth-anything-v2":
-        model, proc, device = load_depth_anything_v2()
+        model, proc, device = load_depth_anything_v2(preprocessor_json="preprocessor_config.json")
         runner = lambda img: run_depth_anything_v2(img, model, proc, device)
         return runner, device, "depth-anything-v2" 
     elif backend == "monodepth2":
