@@ -137,29 +137,32 @@ def load_depth_anything_v2(
 def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.ndarray:
     h_orig, w_orig = img.shape[:2]
     
+    # Convert BGR->RGB
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # Make height and width multiples of 14
+
+    # Make height and width multiples of 14 (for DepthAnythingV2 patching)
     patch_size = 14
     new_h = (h_orig // patch_size) * patch_size
     new_w = (w_orig // patch_size) * patch_size
     rgb_resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    
-    # Convert to tensor
+
+    # Convert to tensor: [B, C, H, W]
     tensor_input = processor(images=rgb_resized, return_tensors="pt").pixel_values.to(device)
-    
+
     with torch.no_grad():
-        pred = model(tensor_input)  # [B, H', W']
+        pred = model(tensor_input)  # DepthAnythingV2 expects [B, C, H, W]
         
-        # If pred is [B, 1, H', W'] or [B, H', W'], squeeze properly
-        if pred.ndim == 4:  # [B,1,H,W]
-            pred = pred.squeeze(1)  # -> [B,H,W]
+        # If output is [B, 1, H, W] or [B, H, W], ensure 4D for interpolate
+        if pred.ndim == 3:  # [B, H, W]
+            pred = pred.unsqueeze(1)  # -> [B, 1, H, W]
         
+        # Resize back to original image
         pred = torch.nn.functional.interpolate(
             pred, size=(h_orig, w_orig), mode="bilinear", align_corners=False
         )
     
-    depth_map = pred[0].cpu().numpy()  # take first batch, shape [H,W]
+    # Return as 2D numpy array
+    depth_map = pred[0,0].cpu().numpy()  # take first batch and channel
     return depth_map
 
 
