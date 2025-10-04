@@ -390,7 +390,7 @@ def main():
     ap.add_argument("--max_frames", type=int, default=300)
     ap.add_argument("--fps", type=float, default=25.0)
     ap.add_argument("--lidar_fps", type=float, default=10.0)
-    ap.add_argument("--depth_backend", choices=["midas","zoe","fastdepth"], default="midas")
+    ap.add_argument("--depth_backend", choices=["midas","zoe","fastdepth","depth-anything-v2","monodepth2"], default="midas")
     ap.add_argument("--camera_start", type=int, default=15000)
     ap.add_argument("--camera_end",   type=int, default=16500)
     ap.add_argument("--lidar_start",  type=int, default=6000)
