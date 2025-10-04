@@ -7,53 +7,59 @@ import sys
 sys.path.append("/kaggle/working/new_model")
 
 # ---------- Monodepth2 ----------
-def load_monodepth2(model_dir="weights/monodepth2/mono+stereo_640x192"):
-    import torch
-    from monodepth2.layers import disp_to_depth
-    from monodepth2.networks import ResnetEncoder, DepthDecoder
+# ---------- Monodepth2 ----------
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+from modules.monodepth2 import network
 
-    # --- Load encoder ---
-    encoder = ResnetEncoder(18, False)
-    encoder_path = f"{model_dir}/encoder.pth"
-    loaded_dict_enc = torch.load(encoder_path, map_location=device)
-    # extract height and width from encoder
-    feed_height = loaded_dict_enc['height']
-    feed_width = loaded_dict_enc['width']
+# ---------- Loader ----------
+def load_monodepth2(model_dir="weights/monodepth2"):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load encoder
+    encoder = network.ResnetEncoder(18, False)
+    loaded_dict_enc = torch.load(f"{model_dir}/encoder.pth", map_location=device)
     filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in encoder.state_dict()}
     encoder.load_state_dict(filtered_dict_enc)
-    encoder.to(device)
-    encoder.eval()
+    encoder.to(device).eval()
 
-    # --- Load depth decoder ---
-    depth_decoder = DepthDecoder(num_ch_enc=encoder.num_ch_enc, scales=range(4))
-    depth_decoder_path = f"{model_dir}/depth.pth"
-    loaded_dict = torch.load(depth_decoder_path, map_location=device)
+    # Load depth decoder
+    depth_decoder = network.DepthDecoder(num_ch_enc=encoder.num_ch_enc, scales=range(4))
+    loaded_dict = torch.load(f"{model_dir}/depth.pth", map_location=device)
     depth_decoder.load_state_dict(loaded_dict)
-    depth_decoder.to(device)
-    depth_decoder.eval()
+    depth_decoder.to(device).eval()
 
-    return encoder, depth_decoder, device, feed_height, feed_width
-def run_monodepth2(img: np.ndarray, encoder, depth_decoder, device: str, feed_height: int, feed_width: int) -> np.ndarray:
-    import cv2, torch
-    import numpy as np
+    # Dummy processor for interface consistency
+    processor = None
 
-    # Resize to training resolution
-    input_image = cv2.resize(img, (feed_width, feed_height))
-    input_image = cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB) / 255.0
-    input_image = torch.from_numpy(input_image).float().permute(2, 0, 1).unsqueeze(0).to(device)
+    return (encoder, depth_decoder, processor, device)
+
+
+# ---------- Runner ----------
+def run_monodepth2(img: np.ndarray, encoder, depth_decoder, processor, device) -> np.ndarray:
+    """
+    img: HxWx3 BGR image
+    returns: HxW depth map
+    """
+    h_orig, w_orig = img.shape[:2]
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img_resized = cv2.resize(img_rgb, (1024, 320))  # model training resolution
+
+    input_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
+    input_tensor = input_tensor.unsqueeze(0).to(device)
 
     with torch.no_grad():
-        features = encoder(input_image)
+        features = encoder(input_tensor)
         outputs = depth_decoder(features)
         disp = outputs[("disp", 0)]
+        # Resize back to original image size
         disp_resized = torch.nn.functional.interpolate(
-            disp, (img.shape[0], img.shape[1]), mode="bilinear", align_corners=False
+            disp, size=(h_orig, w_orig), mode="bilinear", align_corners=False
         )
 
     depth_map = disp_resized.squeeze().cpu().numpy()
-    return depth_map    
+    return depth_map
+
+  
 #----Depth_Anything(V2)------
 
 # def load_depth_anything_v2(model_id: str = "depth-anything/Depth-Anything-V2-Base"):
@@ -354,8 +360,8 @@ def load_depth_backend(backend: str = "zoe"):
         runner = lambda img: run_depth_anything_v2(img, model, proc, device)
         return runner, device, "depth-anything-v2" 
     elif backend == "monodepth2":
-        encoder, depth_decoder, device, H, W = load_monodepth2()
-        runner = lambda img: run_monodepth2(img, encoder, depth_decoder, device, H, W)
+        encoder, depth_decoder, proc, device = load_monodepth2()
+        runner = lambda img: run_monodepth2(img, encoder, depth_decoder, proc, device)
         return runner, device, "monodepth2"
     else:
         raise ValueError(f"Unknown backend '{backend}'. Use 'zoe' or 'midas'.")
