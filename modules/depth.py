@@ -12,7 +12,7 @@ sys.path.append("/kaggle/working/new_model")
 from modules.monodepth2 import network
 
 # ---------- Loader ----------
-def load_monodepth2(model_dir="weights/monodepth2"):
+def load_monodepth2(model_dir="/kaggle/working/lidar_monocular_depth/weights/monodepth2"):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load encoder
