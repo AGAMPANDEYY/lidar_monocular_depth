@@ -163,6 +163,9 @@ def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.
     
     # Return as 2D numpy array
     depth_map = pred[0,0].cpu().numpy()  # take first batch and channel
+    depth_map = np.nan_to_num(depth_map, nan=0.0, posinf=0.0, neginf=0.0)
+    depth_map = np.clip(depth_map, 0, np.percentile(depth_map, 99))  # remove extreme outliers
+
     return depth_map
 
 
