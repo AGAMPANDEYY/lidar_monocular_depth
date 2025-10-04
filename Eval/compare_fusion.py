@@ -885,53 +885,102 @@ def compare_depth_methods(base_dir):
             else:
                 print(f"WARNING: Insufficient points for {method} at {rb} (N={len(pred)})")
 
-    # Create DataFrame and print results
+    # # Create DataFrame and print results    
+    
     df_dense = pd.DataFrame(dense_results)
     print("\nDense Depth Results:")
     print(df_dense.to_string(index=False))
-            
-    # Create dense depth plots right after computing the metrics
+    
+    # Convert numeric columns before plotting
     dense_df = pd.DataFrame(dense_results)
     if not dense_df.empty:
-        plt.figure(figsize=(8,5))
+        # Ensure numeric conversion
+        for col in ["AbsRel", "RMSE"]:
+            if col in dense_df.columns:
+                dense_df[col] = pd.to_numeric(dense_df[col], errors="coerce")
+        
+        # Ensure 'Range' is string or categorical for plotting
+        if "Range" in dense_df.columns:
+            dense_df["Range"] = dense_df["Range"].astype(str)
+        
+        # Drop any rows with missing numeric values
+        dense_df = dense_df.dropna(subset=["AbsRel", "RMSE"])
+        
+        print("Data types before plotting:\n", dense_df.dtypes)
+    
+        # === Plot AbsRel ===
+        plt.figure(figsize=(8, 5))
         sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
         plt.xlabel('Range')
         plt.ylabel('AbsRel')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
-        plt.close()
-
-        plt.figure(figsize=(8,5))
-        sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
-        plt.xlabel('Range')
-        plt.ylabel('RMSE (m)')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
-        plt.close()
-    # Create dense depth plots right after computing the metrics
-    dense_df = pd.DataFrame(dense_results)
-    if not dense_df.empty:
-        plt.figure(figsize=(8,5))
-        sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
         plt.title('Dense AbsRel by Range')
-        plt.ylabel('AbsRel')
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
         plt.close()
-
-        plt.figure(figsize=(8,5))
+    
+        # === Plot RMSE ===
+        plt.figure(figsize=(8, 5))
         sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
-        plt.title('Dense RMSE by Range')
+        plt.xlabel('Range')
         plt.ylabel('RMSE (m)')
+        plt.title('Dense RMSE by Range')
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
         plt.close()
-
+    
     print("\nDense Depth Accuracy (vs LiDAR, stratified):")
     dense_results_df = pd.DataFrame(dense_results).round(3)
-    print(dense_results_df)
+    print(dense_results_df.to_string(index=False))
+
+    
+   
+    # df_dense = pd.DataFrame(dense_results)
+    # print("\nDense Depth Results:")
+    # print(df_dense.to_string(index=False))
+            
+    # # Create dense depth plots right after computing the metrics
+    # dense_df = pd.DataFrame(dense_results)
+    # if not dense_df.empty:
+    #     plt.figure(figsize=(8,5))
+    #     sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
+    #     plt.xlabel('Range')
+    #     plt.ylabel('AbsRel')
+    #     plt.tight_layout()
+    #     plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
+    #     plt.close()
+
+    #     plt.figure(figsize=(8,5))
+    #     sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
+    #     plt.xlabel('Range')
+    #     plt.ylabel('RMSE (m)')
+    #     plt.tight_layout()
+    #     plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
+    #     plt.close()
+    # # Create dense depth plots right after computing the metrics
+    # dense_df = pd.DataFrame(dense_results)
+    # if not dense_df.empty:
+    #     plt.figure(figsize=(8,5))
+    #     sns.barplot(data=dense_df, x='Range', y='AbsRel', hue='Method')
+    #     plt.title('Dense AbsRel by Range')
+    #     plt.ylabel('AbsRel')
+    #     plt.tight_layout()
+    #     plt.savefig(os.path.join(output_dir, 'dense_absrel_by_range.png'))
+    #     plt.close()
+
+    #     plt.figure(figsize=(8,5))
+    #     sns.barplot(data=dense_df, x='Range', y='RMSE', hue='Method')
+    #     plt.title('Dense RMSE by Range')
+    #     plt.ylabel('RMSE (m)')
+    #     plt.tight_layout()
+    #     plt.savefig(os.path.join(output_dir, 'dense_rmse_by_range.png'))
+    #     plt.close()
+
+    # print("\nDense Depth Accuracy (vs LiDAR, stratified):")
+    # dense_results_df = pd.DataFrame(dense_results).round(3)
+    # print(dense_results_df)
     
     # Create visualizations for dense metrics
+    
     create_depth_comparison_plot(dense_results_df, 'AbsRel', 'Absolute Relative Error', 'dense_absrel_comparison.png')
     create_depth_comparison_plot(dense_results_df, 'RMSE', 'RMSE (m)', 'dense_rmse_comparison.png')
 
