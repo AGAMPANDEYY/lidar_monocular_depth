@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from collections import OrderedDict
-from layers import *
+from ..layers import *
 
 
 class DepthDecoder(nn.Module):
@@ -63,3 +63,4 @@ class DepthDecoder(nn.Module):
                 self.outputs[("disp", i)] = self.sigmoid(self.convs[("dispconv", i)](x))
 
         return self.outputs
+
