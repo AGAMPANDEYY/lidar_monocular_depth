@@ -258,23 +258,24 @@ def run_depth_anything_v2(img: np.ndarray, model, processor, device: str) -> np.
 #     return depth_map
 
 # # ---------- MiDaS ----------
-# def load_midas_model():
-#     midas = torch.hub.load('intel-isl/MiDaS', 'DPT_Hybrid')
-#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-#     midas.to(device).eval()
-#     transforms = torch.hub.load('intel-isl/MiDaS', 'transforms')
-#     transform = transforms.dpt_transform
-#     return midas, transform, device
 
-# def run_midas_depth(img: np.ndarray, midas: Any, transform: Any, device: str) -> np.ndarray:
-#     input_batch = transform(img).to(device)
-#     with torch.no_grad():
-#         pred = midas(input_batch)
-#         pred = torch.nn.functional.interpolate(
-#             pred.unsqueeze(1), size=img.shape[:2], mode="bicubic", align_corners=False
-#         ).squeeze(1)
-#     depth_map = pred.squeeze().cpu().numpy()
-#     return depth_map
+def load_midas_model():
+    midas = torch.hub.load('intel-isl/MiDaS', 'DPT_Hybrid')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    midas.to(device).eval()
+    transforms = torch.hub.load('intel-isl/MiDaS', 'transforms')
+    transform = transforms.dpt_transform
+    return midas, transform, device
+
+def run_midas_depth(img: np.ndarray, midas: Any, transform: Any, device: str) -> np.ndarray:
+    input_batch = transform(img).to(device)
+    with torch.no_grad():
+        pred = midas(input_batch)
+        pred = torch.nn.functional.interpolate(
+            pred.unsqueeze(1), size=img.shape[:2], mode="bicubic", align_corners=False
+        ).squeeze(1)
+    depth_map = pred.squeeze().cpu().numpy()
+    return depth_map
 
 # ---------- ZoeDepth (Hugging Face Transformers) ----------
 # Model card: Intel/zoedepth-nyu-kitti; classes: ZoeDepthForDepthEstimation + AutoImageProcessor
