@@ -7,7 +7,8 @@ import torch
 import numpy as np
 from PIL import Image
 import sys
-sys.path.append('baselines/monodepth2')  # Add MonoDepth2 to path
+# sys.path.append('baselines/monodepth')  # Add MonoDepth2 to path
+sys.path.append('r/kaggle/working/baselines')  # Add MonoDepth2 to path
 
 # class BaselineRunner:
 #     def __init__(self):
@@ -111,7 +112,7 @@ class BaselineRunner:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.models = {}
 
-    def load_vehicle_distance_model(self, model_path="baselines/weights/yolo8s.pt"):
+    def load_vehicle_distance_model(self, model_path="r/kaggle/working/baselines/weights/yolo8s.pt"):
         """Load YOLO model for Vehicle Distance Measurement"""
         try:
             self.models['VehicleDistance'] = YOLO(model_path)
