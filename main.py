@@ -77,7 +77,7 @@ from modules.depth_fusion.fusion import fuse_confidence          # using the cop
 from modules.metrics import compute_ecw_bubble
 from modules.metrics import TTCTracker, robust_box_depth
 from modules.visualization import overlay_results
-from baselines.models import VehicleDistanceBaseline, run_baseline_comparison
+# from baselines.models import VehicleDistanceBaseline, run_baseline_comparison
 
 # ECW Constants
 T_WARN_VRU = 2.0  # seconds for pedestrians/bikes
