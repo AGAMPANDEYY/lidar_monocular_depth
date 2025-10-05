@@ -174,11 +174,11 @@ def run_baseline_comparison(img_path, lidar_path):
     
     # Test each baseline
     baselines = [
-        # ('MonoDepth2', MonoDepth2Baseline()),
-        # ('DORN', DORNBaseline()),
-        # ('PureLiDAR', PureLiDARBaseline()),
-        # ('DeepLiDAR', DeepLiDARBaseline()),
-        ('VehicleDistance', VehicleDistanceBaseline())
+        ('MonoDepth2', MonoDepth2Baseline()),
+        ('DORN', DORNBaseline()),
+        ('PureLiDAR', PureLiDARBaseline()),
+        ('DeepLiDAR', DeepLiDARBaseline())
+        # ('VehicleDistance', VehicleDistanceBaseline())
     ]
     
     for name, model in baselines:
