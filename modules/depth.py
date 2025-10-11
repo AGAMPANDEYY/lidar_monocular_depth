@@ -17,7 +17,7 @@ def load_monodepth2(model_dir="/kaggle/working/lidar_monocular_depth/weights/mon
 
     # Load encoder
     encoder = network.ResnetEncoder(18, False)
-    loaded_dict_enc = torch.load(f"{model_dir}/encoder.pth", map_location=device)
+    loaded_dict_enc = torch.load(f"{model_dir}/encoder.pth", map_location=device, weights_only=False)
     filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in encoder.state_dict()}
     encoder.load_state_dict(filtered_dict_enc)
     encoder.to(device).eval()
