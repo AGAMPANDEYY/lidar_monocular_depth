@@ -107,7 +107,7 @@ def resize_to_multiple(img: np.ndarray, multiple: int = 14):
 
 # ---------- Load model ----------
 def load_depth_anything_v2(
-    checkpoint_path: str = "/kaggle/working/lidar_monocular_depth/checkpoints/depth_anything_v2_vitb.pth"
+    checkpoint_path: str = "/kaggle/input/checkpoint/depth_anything_v2_vitb.pth"
 ):
     # Initialize model
     model = DepthAnythingV2(
