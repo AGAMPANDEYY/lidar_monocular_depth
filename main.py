@@ -55,7 +55,9 @@ import re
 import sys
 import argparse
 import time
+import json
 import psutil
+import itertools
 from glob import glob
 
 import numpy as np
@@ -84,15 +86,22 @@ MIN_PERSISTENCE_FRAMES = 3  # frames of continuous warning before triggering
 MIN_SIZE_M = {'width': 0.2, 'height': 0.2}  # minimum object size in meters
 MAX_SIZE_M = {'width': 2.5, 'height': 3.0}  # maximum object size in meters
 
+# Runtime toggles (set inside main() from CLI flags)
+USE_EMA = True
+USE_SANITY_CHECKS = True
+USE_MISSED_MINING = True
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 FRAME_DIR = 'data/frames'
 LIDAR_DIR = 'data/lidar'  # Changed to match where LiDAR files actually are
 OUT_DIR   = 'data/fused_output'
 YOLO_WEIGHTS = 'detection/best.pt'
+DET_CACHE_DIR = 'data/detection_cache'
 
 os.makedirs(OUT_DIR, exist_ok=True)
 DBG_DIR = os.path.join(OUT_DIR, "debug")
 os.makedirs(DBG_DIR, exist_ok=True)
+os.makedirs(DET_CACHE_DIR, exist_ok=True)
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
 def norm_stem(s: str) -> str:
@@ -285,9 +294,11 @@ def main():
     parser.add_argument('--camera_fps',   type=float, default=25.0)
     parser.add_argument('--lidar_fps',    type=float, default=10.0)
     parser.add_argument('--max_frames',   type=int,   default=10,  help='Process at most N frames')
+    parser.add_argument('--frame_sampling', choices=['contiguous','random'], default='contiguous',
+                        help='How to pick frames when more are available than --max_frames.')
     parser.add_argument('--depth_backend', type=str, default='midas',
-                    choices=['fastdepth','zoe', 'midas'],
-                    help="Monocular depth backend: 'zoe' (HuggingFace) or 'midas' or 'fastdepth'")
+                    choices=['midas','zoe','fastdepth','depthanythingv2','monodepth2'],
+                    help="Monocular depth backend: choose from 'midas', 'zoe', 'fastdepth', 'depthanythingv2', 'monodepth2'")
     parser.add_argument('--ecw_top',   type=float, default=0.55, help='ECW top y (0..1 of H)')
     parser.add_argument('--ecw_bot',   type=float, default=0.95, help='ECW bottom y (0..1 of H)')
     parser.add_argument('--ecw_top_w', type=float, default=0.20, help='ECW top width as fraction of W')
@@ -314,9 +325,27 @@ def main():
     parser.add_argument('--no_mining', action='store_true', help='Disable missed-obstacle mining')
     parser.add_argument('--no_sanity', action='store_true', help='Disable persistence/hysteresis sanity checks')
     parser.add_argument('--hysteresis', type=float, default=0.5, help='ECW hysteresis seconds')
+    parser.add_argument('--lidar_dropout_pct', type=float, default=0.0,
+                        help='Simulate LiDAR dropout by randomly masking this fraction of points (0-1).')
+    parser.add_argument('--lidar_yaw_jitter_deg', type=float, default=0.0,
+                        help='Approximate LiDAR yaw perturbation in degrees (applied as horizontal shift).')
+    parser.add_argument('--principal_point_jitter_px', nargs=2, type=float, default=[0.0, 0.0],
+                        help='Shift monocular depth to emulate principal point error: dx dy in pixels.')
+    parser.add_argument('--perturb_seed', type=int, default=42, help='Seed for stochastic perturbations.')
+    parser.add_argument('--ecw_depth_threshold', type=float, default=10.0,
+                        help='Depth (m) that defines the ECW bubble / ground-truth boundary.')
+    parser.add_argument('--lidar_holdout', choices=['none','beam'], default='beam',
+                        help='Disjoint LiDAR split: prior (input) vs GT (evaluation).')
+    parser.add_argument('--lidar_holdout_ratio', type=float, default=0.3,
+                        help='Fraction of LiDAR points assigned to GT set when using hold-out.')
 
 
     args = parser.parse_args()
+    perturb_rng = np.random.default_rng(args.perturb_seed)
+    jitter_dx = int(round(args.principal_point_jitter_px[0])) if args.principal_point_jitter_px else 0
+    jitter_dy = int(round(args.principal_point_jitter_px[1])) if args.principal_point_jitter_px else 0
+
+    default_out_dir = parser.get_default('out_dir')
 
     print("\n========== PIPELINE BOOT ==========")
     print(f"[CFG] Camera frames: {args.camera_start} .. {args.camera_end} @ {args.camera_fps:.1f} fps")
@@ -325,12 +354,21 @@ def main():
 
     # Set output directories from CLI
     global OUT_DIR, DBG_DIR, T_HYSTERESIS
+    if args.out_dir == default_out_dir:
+        args.out_dir = os.path.join(args.out_dir, args.depth_backend.lower())
     OUT_DIR = args.out_dir
     os.makedirs(OUT_DIR, exist_ok=True)
     DBG_DIR = os.path.join(OUT_DIR, "debug")
     os.makedirs(DBG_DIR, exist_ok=True)
-    # Set hysteresis at runtime
-    T_HYSTERESIS = args.hysteresis
+    # Set global toggles from CLI
+    global USE_EMA, USE_SANITY_CHECKS, USE_MISSED_MINING
+    if args.ecw_use_fused:
+        args.ecw_source = 'fused'
+    USE_EMA = not args.no_ema
+    USE_SANITY_CHECKS = not args.no_sanity
+    USE_MISSED_MINING = not args.no_mining
+    # Set hysteresis at runtime (disable if sanity checks skipped)
+    T_HYSTERESIS = args.hysteresis if USE_SANITY_CHECKS else 0.0
     # ...existing code...
     def _load_fx_from_yaml(path="optimized_calibration/camera_optimized.yaml"):
         try:
@@ -354,13 +392,32 @@ def main():
         raise FileNotFoundError(f"[ERR] Front view directory not found: {FRONT_VIEW_DIR}")
 
     # Frame list (bounded + max_frames)
-    frame_files = sorted([
+    frame_candidates = sorted([
         f for f in os.listdir(FRONT_VIEW_DIR)
         if f.endswith('.png') and args.camera_start <= int(os.path.splitext(f)[0]) <= args.camera_end
     ], key=lambda x: int(os.path.splitext(x)[0]))
-    total_candidates = len(frame_files)
-    frame_files = frame_files[:args.max_frames]
-    print(f"[INFO] Found {total_candidates} frames in range; will process {len(frame_files)}")
+    total_candidates = len(frame_candidates)
+    num_to_process = min(args.max_frames, total_candidates)
+
+    if num_to_process <= 0:
+        frame_files = []
+    elif total_candidates > num_to_process:
+        if args.frame_sampling == 'random':
+            sampled = perturb_rng.choice(frame_candidates, size=num_to_process, replace=False)
+            frame_files = sorted(sampled.tolist(), key=lambda x: int(os.path.splitext(x)[0]))
+            print(f"[INFO] Randomly sampled {num_to_process} frames (seed={args.perturb_seed}) "
+                  f"from {total_candidates} candidates in range.")
+        else:
+            start_idx = int(perturb_rng.integers(0, total_candidates - num_to_process + 1))
+            frame_files = frame_candidates[start_idx:start_idx + num_to_process]
+            print(f"[INFO] Selected contiguous window [{start_idx}:{start_idx+num_to_process}) "
+                  f"(seed={args.perturb_seed}) from {total_candidates} frames.")
+    else:
+        frame_files = frame_candidates
+        print(f"[INFO] Using all {num_to_process} frames available in range.")
+
+    planned_frames = len(frame_files)
+    print(f"[INFO] Found {total_candidates} frames in range; will process {planned_frames}")
 
     # Load models
     print("\n[LOAD] YOLO weights:", YOLO_WEIGHTS)
@@ -426,12 +483,113 @@ def main():
 
     csv_rows = []
     timing_rows = []  # For performance metrics
+    episode_states = {}
+    episode_logs = []
+    episode_id_counter = itertools.count(1)
+    processed_frames = 0
+    last_timestamp_processed = 0.0
+
+    def finalize_episode(ep_key: str, reason: str):
+        state = episode_states.get(ep_key)
+        if not state:
+            return
+        active = state.get("active")
+        if not active:
+            return
+        lead_time = (active.get("warn_time") - active.get("onset_time")) if (active.get("warn_time") is not None and active.get("onset_time") is not None) else np.nan
+        episode_logs.append({
+            "episode_id": active.get("id"),
+            "obj_id": ep_key,
+            "class": active.get("class"),
+            "onset_frame": active.get("onset_frame"),
+            "onset_time": active.get("onset_time"),
+            "onset_ttc": active.get("onset_ttc"),
+            "warning_frame": active.get("warn_frame"),
+            "warning_time": active.get("warn_time"),
+            "warning_ttc": active.get("warn_ttc"),
+            "lead_time_s": lead_time,
+            "warning_issued": bool(active.get("warn_frame") is not None),
+            "dzdt_onset": active.get("dzdt_onset"),
+            "end_frame": state.get("last_seen_frame"),
+            "end_time": state.get("last_seen_time"),
+            "end_reason": reason,
+            "fusion_mode": args.fusion_mode,
+            "ecw_source": args.ecw_source,
+            "use_ema": USE_EMA,
+            "use_sanity": USE_SANITY_CHECKS,
+            "use_mining": USE_MISSED_MINING,
+            "hysteresis": T_HYSTERESIS,
+            "min_persistence_frames": active.get("min_frames"),
+            "ego_speed": ego_speed,
+            "depth_backend": depth_name,
+            "run_out_dir": OUT_DIR
+        })
+        state["active"] = None
+        state["consec_under"] = 0
+
+    def update_episode_state(ep_key: str, cls_name: str, ttc: float, dzdt: float,
+                              ecw_flag: bool, warn_raw: bool, warn_stable: bool,
+                              frame_idx_val: int, time_seconds: float):
+        state = episode_states.setdefault(ep_key, {
+            "consec_under": 0,
+            "active": None,
+            "last_seen_frame": frame_idx_val,
+            "last_seen_time": time_seconds,
+            "last_class": cls_name,
+        })
+        state["last_seen_frame"] = frame_idx_val
+        state["last_seen_time"] = time_seconds
+        state["last_class"] = cls_name
+
+        approaching = np.isfinite(dzdt) and (dzdt < 0)
+        is_valid_ttc = np.isfinite(ttc)
+        t_warn_local = get_ttc_threshold(cls_name)
+        is_candidate = is_valid_ttc and ecw_flag and approaching
+
+        is_vru = any(k in str(cls_name).lower() for k in VRU_TOKENS)
+        min_frames_req = 2 if is_vru else 3
+
+        if is_candidate and (ttc <= t_warn_local):
+            state["consec_under"] += 1
+        else:
+            state["consec_under"] = 0
+
+        if state["consec_under"] >= min_frames_req and state.get("active") is None:
+            episode_id = next(episode_id_counter)
+            state["active"] = {
+                "id": episode_id,
+                "class": cls_name,
+                "onset_frame": frame_idx_val,
+                "onset_time": time_seconds,
+                "onset_ttc": float(ttc) if is_valid_ttc else np.nan,
+                "dzdt_onset": float(dzdt) if np.isfinite(dzdt) else np.nan,
+                "min_frames": min_frames_req,
+                "warn_frame": None,
+                "warn_time": None,
+                "warn_ttc": None
+            }
+
+        active = state.get("active")
+        if active and warn_stable and active.get("warn_frame") is None:
+            active["warn_frame"] = frame_idx_val
+            active["warn_time"] = time_seconds
+            active["warn_ttc"] = float(ttc) if is_valid_ttc else np.nan
+
+        active = state.get("active")
+        if active:
+            if not ecw_flag:
+                finalize_episode(ep_key, "exit_ecw")
+            elif not approaching or not is_valid_ttc:
+                finalize_episode(ep_key, "not_approaching")
+            elif (state["consec_under"] == 0) and (not warn_raw) and (not warn_stable):
+                finalize_episode(ep_key, "ttc_cleared")
 
     print("\n========== PROCESSING ==========")
     for idx, fname in enumerate(frame_files, 1):
         frame_id = os.path.splitext(fname)[0]
         camera_frame = int(frame_id)
-        
+        frame_time_seconds = (camera_frame - args.camera_start) / fps_for_ttc
+
         # Check if outputs already exist for this frame
         outputs_exist = all(
             os.path.exists(os.path.join(DBG_DIR, f"{frame_id}_{suffix}"))
@@ -465,7 +623,20 @@ def main():
 
         # Detection timing
         t0 = time.perf_counter()
-        pred_bboxes = run_obstacle_detection(img_np, yolo_model)
+        det_json = os.path.join(DET_CACHE_DIR, f"{frame_id}.json")
+        if os.path.exists(det_json):
+            with open(det_json, "r") as f_det:
+                pred_bboxes = json.load(f_det)
+        else:
+            raw_boxes = run_obstacle_detection(img_np, yolo_model)
+            pred_bboxes = []
+            for box in raw_boxes:
+                x1, y1, x2, y2, cls_idx, conf = box
+                pred_bboxes.append([
+                    float(x1), float(y1), float(x2), float(y2), int(cls_idx), float(conf)
+                ])
+            with open(det_json, "w") as f_det:
+                json.dump(pred_bboxes, f_det)
         t1 = time.perf_counter()
         print(f"  [DET] objects: {len(pred_bboxes)}")
 
@@ -563,18 +734,60 @@ def main():
         else:
             Dlidar_small, Mlidar_small = Dlidar, Mlidar
 
-        valid = int(Mlidar_small.sum())
-        print(f"  [LIDAR] valid px: {valid}")
+        if abs(args.lidar_yaw_jitter_deg) > 0:
+            approx_deg_per_px = 0.2
+            shift_px = int(round(args.lidar_yaw_jitter_deg / approx_deg_per_px))
+            if shift_px != 0:
+                Dlidar_small = np.roll(Dlidar_small, shift_px, axis=1)
+                Mlidar_small = np.roll(Mlidar_small, shift_px, axis=1)
+                if shift_px > 0:
+                    Mlidar_small[:, :shift_px] = False
+                    Dlidar_small[:, :shift_px] = 0.0
+                else:
+                    Mlidar_small[:, shift_px:] = False
+                    Dlidar_small[:, shift_px:] = 0.0
+                print(f"  [PERTURB] Applied yaw jitter shift_px={shift_px}")
+
+        if args.lidar_dropout_pct > 0:
+            dropout_mask = perturb_rng.random(Mlidar_small.shape) < args.lidar_dropout_pct
+            Mlidar_small[dropout_mask] = False
+            Dlidar_small[dropout_mask] = 0.0
+            print(f"  [PERTURB] Applied LiDAR dropout {args.lidar_dropout_pct*100:.1f}%")
+
+        def split_lidar_mask(mask_bool, ratio=0.3):
+            rows, cols = np.nonzero(mask_bool)
+            if rows.size == 0:
+                return mask_bool.copy(), np.zeros_like(mask_bool, dtype=bool)
+            h = (rows * 1315423911 + cols * 2654435761) & 0xFFFFFFFF
+            frac = (h.astype(np.uint64) % 10000) / 10000.0
+            m_gt = np.zeros_like(mask_bool, dtype=bool)
+            m_gt[rows[frac < ratio], cols[frac < ratio]] = True
+            m_prior = mask_bool & (~m_gt)
+            return m_prior, m_gt
+
+        if args.lidar_holdout == 'beam':
+            holdout_ratio = float(np.clip(args.lidar_holdout_ratio, 0.0, 1.0))
+            Mlidar_prior, Mlidar_gt = split_lidar_mask(Mlidar_small, ratio=holdout_ratio)
+        else:
+            holdout_ratio = 0.0
+            Mlidar_prior = Mlidar_small.copy()
+            Mlidar_gt = np.zeros_like(Mlidar_small, dtype=bool)
+
+        Dlidar_prior = np.where(Mlidar_prior, Dlidar_small, np.nan).astype(np.float32)
+        Dlidar_gt    = np.where(Mlidar_gt,    Dlidar_small, np.nan).astype(np.float32)
+
+        valid = int(Mlidar_prior.sum())
+        print(f"  [LIDAR] valid input px: {valid} (GT hold-out {int(Mlidar_gt.sum())}, ratio={holdout_ratio:.2f})")
         if valid == 0:
-            print("  [LIDAR][WARN] 0 valid px — calibration/sync suspect")
+            print("  [LIDAR][WARN] 0 prior px — calibration/sync suspect")
 
         # --- Convert MiDaS relative to metric meters using LiDAR overlap ---
         eps = 1e-6
         if args.depth_backend == 'midas':
-            overlap = Mlidar_small & np.isfinite(depth_map) & np.isfinite(Dlidar_small) & (Dlidar_small > 0)
+            overlap = Mlidar_prior & np.isfinite(depth_map) & np.isfinite(Dlidar_prior) & (Dlidar_prior > 0)
             if overlap.sum() >= 200:
                 r = depth_map[overlap].astype(np.float32)
-                z = Dlidar_small[overlap].astype(np.float32)
+                z = Dlidar_prior[overlap].astype(np.float32)
                 r_lo, r_hi = np.percentile(r, [2, 98])
                 if r_hi <= r_lo:
                     r_lo, r_hi = float(r.min()), float(r.max())
@@ -614,16 +827,16 @@ def main():
                 print(f"  [CAL][Huber] fit AB using {x.size} pts: A={A:.6f}, B={B:.6f} -> min≈{1.0/(A+B+eps):.2f} m, max≈{1.0/(B+eps):.2f} m (from overlap)")
             else:
                 print("  [CAL][WARN] insufficient overlap; using median-ratio scale fallback")
-                overlap2 = Mlidar_small & np.isfinite(depth_map) & (depth_map > 0)
+                overlap2 = Mlidar_prior & np.isfinite(depth_map) & (depth_map > 0)
                 if overlap2.sum() >= 50:
-                    scale = float(np.median(Dlidar_small[overlap2] / (depth_map[overlap2] + eps)))
+                    scale = float(np.nanmedian(Dlidar_prior[overlap2] / (depth_map[overlap2] + eps)))
                 else:
                     scale = 1.0
                 depth_mono_m = np.clip(depth_map * scale, 0.1, 120.0)
         else:
-            overlap = Mlidar_small & np.isfinite(depth_map) & (depth_map > 0)
+            overlap = Mlidar_prior & np.isfinite(depth_map) & (depth_map > 0)
             if overlap.sum() >= 50:
-                scale = float(np.median(Dlidar_small[overlap] / (depth_map[overlap] + eps)))
+                scale = float(np.nanmedian(Dlidar_prior[overlap] / (depth_map[overlap] + eps)))
                 if not np.isfinite(scale) or scale <= 0:
                     scale = 1.0
             else:
@@ -631,8 +844,23 @@ def main():
             depth_mono_m = np.clip(depth_map * scale, 0.1, 80.0)
             print(f"  [CAL] overlap={int(overlap.sum())}, mono_scale={scale:.3f}")
 
+        if jitter_dx != 0 or jitter_dy != 0:
+            if jitter_dy != 0:
+                depth_mono_m = np.roll(depth_mono_m, jitter_dy, axis=0)
+                if jitter_dy > 0:
+                    depth_mono_m[:jitter_dy, :] = np.nan
+                else:
+                    depth_mono_m[jitter_dy:, :] = np.nan
+            if jitter_dx != 0:
+                depth_mono_m = np.roll(depth_mono_m, jitter_dx, axis=1)
+                if jitter_dx > 0:
+                    depth_mono_m[:, :jitter_dx] = np.nan
+                else:
+                    depth_mono_m[:, jitter_dx:] = np.nan
+            print(f"  [PERTURB] Applied principal point jitter dx={jitter_dx}px dy={jitter_dy}px")
+
         # Fuse depths
-        fused_depth, Wlidar, Mfused = fuse_confidence(Dlidar_small, Mlidar_small, depth_mono_m)
+        fused_depth, Wlidar, Mfused = fuse_confidence(Dlidar_prior, Mlidar_prior, depth_mono_m)
         print(f"  [FUSE] mean LiDAR weight: {float(np.nanmean(Wlidar)):.3f}; fused finite px: {int(np.isfinite(fused_depth).sum())}")
 
         # Save dense depth maps for evaluation
@@ -640,8 +868,31 @@ def main():
         np.save(os.path.join(DBG_DIR, f"{frame_id}_mono_depth.npy"), depth_mono_m)
         np.save(os.path.join(DBG_DIR, f"{frame_id}_lidar_depth.npy"), Dlidar_small)
         np.save(os.path.join(DBG_DIR, f"{frame_id}_lidar_mask.npy"), Mlidar_small.astype(np.uint8))
+        np.save(os.path.join(DBG_DIR, f"{frame_id}_lidar_prior_depth.npy"), Dlidar_prior)
+        np.save(os.path.join(DBG_DIR, f"{frame_id}_lidar_prior_mask.npy"), Mlidar_prior.astype(np.uint8))
+        np.save(os.path.join(DBG_DIR, f"{frame_id}_lidar_gt_depth.npy"), Dlidar_gt)
+        np.save(os.path.join(DBG_DIR, f"{frame_id}_lidar_gt_mask.npy"), Mlidar_gt.astype(np.uint8))
         print(f"  [SAVE] depth maps → {frame_id}_*_depth.npy")
         t3 = time.perf_counter()  # After fusion and depth save
+
+        # Prepare per-mode depth maps for downstream logic/metrics
+        lidar_metric = np.full_like(Dlidar_prior, np.nan, dtype=np.float32)
+        lidar_metric[Mlidar_prior] = Dlidar_prior[Mlidar_prior]
+
+        late_depth = np.where(
+            np.isfinite(lidar_metric),
+            0.5 * (lidar_metric + depth_mono_m),
+            depth_mono_m
+        )
+
+        depth_modes = {
+            "mono": depth_mono_m,
+            "lidar": lidar_metric,
+            "late": late_depth,
+            "ours": fused_depth
+        }
+        pred_depth_map = depth_modes.get(args.fusion_mode, fused_depth)
+        ecw_depth_map = depth_modes.get(args.ecw_source, fused_depth)
 
         # ---------- Missed obstacle detection inside ECW (depth blobs not covered by YOLO) ----------
         # 3.1 ECW mask (trapezoid ahead of ego)
@@ -662,7 +913,7 @@ def main():
             det_mask = det_mask.astype(bool)
 
         # 3.3 Enhanced candidate detection for Indian traffic scenarios
-        map_for_ecw = fused_depth if args.ecw_use_fused else depth_mono_m
+        map_for_ecw = ecw_depth_map if ecw_depth_map is not None else fused_depth
         valid_depth = np.isfinite(map_for_ecw)
         
         # Fix depth range conditions (nearer than far limit, farther than near limit)
@@ -681,62 +932,63 @@ def main():
                 motion_cue = motion_mask & ECW_mask & (~det_mask)
         prev_frame = img_np.copy()  # Save for next iteration
         
-        # Combine all cues
-        depth_cue = ECW_mask & valid_depth & near & far & (~det_mask) & not_ground
-        
-        # Final candidate mask combines depth and motion cues
-        cand = depth_cue | motion_cue
-
-        # Optional smoothing / closing to connect sparse LiDAR projections
-        if cand.any():
-            k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
-            cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_CLOSE, k2, iterations=1).astype(bool)
-
         missed_boxes = []
-        if cand.any():
-            # 3.4 Connected components to get blobs
-            num, labels = cv2.connectedComponents(cand.astype(np.uint8), connectivity=8)
-            for lab in range(1, num):
-                blob = labels == lab
-                area = int(blob.sum())
-                if area < args.miss_min_px:
-                    continue
+        if USE_MISSED_MINING:
+            # Combine all cues
+            depth_cue = ECW_mask & valid_depth & near & far & (~det_mask) & not_ground
 
-                # Bounding box
-                ys, xs = np.where(blob)
-                y1, y2 = int(ys.min()), int(ys.max())
-                x1, x2 = int(xs.min()), int(xs.max())
+            # Final candidate mask combines depth and motion cues
+            cand = depth_cue | motion_cue
 
-                # Median fused depth (meters) within blob
-                z_vals = fused_depth[blob]
-                z_vals = z_vals[np.isfinite(z_vals)]
-                if z_vals.size == 0:
-                    continue
-                z_med = float(np.median(z_vals))
-                
-                # Physical size gating
-                width_m, height_m = box_size_meters(x1, y1, x2, y2, z_med, fx_cam, fx_cam)
-                if not (0.2 <= width_m <= 2.5 and 0.2 <= height_m <= 3.0):
-                    continue  # Skip if outside human-like size range
-                
-                # Compute hazard score
-                blob_mask = blob.astype(bool)
-                
-                # Depth score (1 if inside valid range)
-                s_depth = 1.0 if (args.miss_near_m <= z_med <= args.miss_far_m) else 0.0
-                
-                # Motion score (average flow magnitude in blob)
-                s_motion = 0.0
-                if args.use_motion and flow_magnitudes is not None:
-                    flow_in_blob = flow_magnitudes[blob_mask]
-                    s_motion = float(flow_in_blob.mean()) / args.flow_thresh if flow_in_blob.size > 0 else 0.0
-                
-                # Combined hazard score
-                w_depth, w_motion = 0.6, 0.4  # Weights for depth and motion
-                hazard_score = w_depth * s_depth + w_motion * s_motion
-                
-                if hazard_score >= 0.5:  # Only keep high-scoring candidates
-                    missed_boxes.append((x1, y1, x2, y2, z_med, width_m, height_m, hazard_score))
+            # Optional smoothing / closing to connect sparse LiDAR projections
+            if cand.any():
+                k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+                cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_CLOSE, k2, iterations=1).astype(bool)
+
+            if cand.any():
+                # 3.4 Connected components to get blobs
+                num, labels = cv2.connectedComponents(cand.astype(np.uint8), connectivity=8)
+                for lab in range(1, num):
+                    blob = labels == lab
+                    area = int(blob.sum())
+                    if area < args.miss_min_px:
+                        continue
+
+                    # Bounding box
+                    ys, xs = np.where(blob)
+                    y1, y2 = int(ys.min()), int(ys.max())
+                    x1, x2 = int(xs.min()), int(xs.max())
+
+                    # Median fused depth (meters) within blob
+                    z_vals = fused_depth[blob]
+                    z_vals = z_vals[np.isfinite(z_vals)]
+                    if z_vals.size == 0:
+                        continue
+                    z_med = float(np.median(z_vals))
+
+                    # Physical size gating
+                    width_m, height_m = box_size_meters(x1, y1, x2, y2, z_med, fx_cam, fx_cam)
+                    if not (0.2 <= width_m <= 2.5 and 0.2 <= height_m <= 3.0):
+                        continue  # Skip if outside human-like size range
+
+                    # Compute hazard score
+                    blob_mask = blob.astype(bool)
+
+                    # Depth score (1 if inside valid range)
+                    s_depth = 1.0 if (args.miss_near_m <= z_med <= args.miss_far_m) else 0.0
+
+                    # Motion score (average flow magnitude in blob)
+                    s_motion = 0.0
+                    if args.use_motion and flow_magnitudes is not None:
+                        flow_in_blob = flow_magnitudes[blob_mask]
+                        s_motion = float(flow_in_blob.mean()) / args.flow_thresh if flow_in_blob.size > 0 else 0.0
+
+                    # Combined hazard score
+                    w_depth, w_motion = 0.6, 0.4  # Weights for depth and motion
+                    hazard_score = w_depth * s_depth + w_motion * s_motion
+
+                    if hazard_score >= 0.5:  # Only keep high-scoring candidates
+                        missed_boxes.append((x1, y1, x2, y2, z_med, width_m, height_m, hazard_score))
 
         # Debug panels
         # Use depth_mono_m for visualization
@@ -774,11 +1026,15 @@ def main():
         base_obj_count = 0  # Initialize counter for TTC tracking
 
 
+        seen_episode_keys = set()
+
         for t in tracks_this_frame:
             x1, y1, x2, y2 = t['bbox']
             cls_name = t['cls']
             conf = t['conf']
             track_id = t['track_id']
+            obj_key = f"det_{track_id}"
+            seen_episode_keys.add(obj_key)
             # inner 40% patch (avoid edges)
             cx, cy = (x1+x2)//2, (y1+y2)//2
             dx = max(1, (x2-x1)//5); dy = max(1, (y2-y1)//5)
@@ -786,12 +1042,14 @@ def main():
             xi2, yi2 = cx + 2*dx, cy + 2*dy
             xi1 = max(0, xi1); yi1 = max(0, yi1); xi2 = min(W-1, xi2); yi2 = min(H-1, yi2)
 
-            mono_patch  = depth_mono_m[yi1:yi2, xi1:xi2]
-            lidar_patch = Dlidar_small[yi1:yi2, xi1:xi2]
-            mask_patch  = Mlidar_small[yi1:yi2, xi1:xi2]
+            mono_patch = depth_mono_m[yi1:yi2, xi1:xi2]
+            lidar_patch_prior = Dlidar_prior[yi1:yi2, xi1:xi2]
+            mask_patch_prior  = Mlidar_prior[yi1:yi2, xi1:xi2]
+            lidar_patch_gt = Dlidar_gt[yi1:yi2, xi1:xi2]
+            mask_patch_gt  = Mlidar_gt[yi1:yi2, xi1:xi2]
 
             mono_vals  = mono_patch[np.isfinite(mono_patch)]
-            lidar_vals = lidar_patch[mask_patch]
+            lidar_vals = lidar_patch_gt[mask_patch_gt]
             mono_depth_val  = float(np.median(mono_vals))  if mono_vals.size  > 0 else np.nan
             lidar_depth_val = float(np.median(lidar_vals)) if lidar_vals.size > 0 else np.nan
 
@@ -802,10 +1060,10 @@ def main():
             lidar_depths.append(lidar_depth_val)
 
             # TTC (time base = camera fps)
-            mask_patch = Mlidar_small[yi1:yi2, xi1:xi2]
-            lidar_hits = int(mask_patch.sum())
-            d_lidar = robust_box_depth(Dlidar_small, [x1,y1,x2,y2], mask=Mlidar_small)
+            lidar_hits = int(mask_patch_prior.sum())
+            d_lidar = robust_box_depth(Dlidar_prior, [x1,y1,x2,y2], mask=Mlidar_prior)
             d_fused = robust_box_depth(fused_depth, [x1,y1,x2,y2], mask=np.isfinite(fused_depth))
+            d_lidar_gt = robust_box_depth(Dlidar_gt, [x1,y1,x2,y2], mask=Mlidar_gt)
             K_MIN = 30
             if lidar_hits < K_MIN or not np.isfinite(d_lidar):
                 d_use = d_fused
@@ -813,45 +1071,74 @@ def main():
                 d_use = d_lidar
 
             # EMA smoothing before TTC
-            state = ttc_tracker.warning_states.setdefault(f"det_{track_id}", 
-                      {'consecutive_frames':0,'warning_active':False,'last_ttc':None,'ema_depth':None})
-            alpha = 0.4
-            if state['ema_depth'] is None or not np.isfinite(state['ema_depth']):
-                d_smooth = d_use
+            state = ttc_tracker.warning_states.setdefault(
+                f"det_{track_id}",
+                {'consecutive_frames':0,'warning_active':False,'last_ttc':None,'ema_depth':None}
+            )
+            if USE_EMA:
+                alpha = 0.4
+                if state['ema_depth'] is None or not np.isfinite(state['ema_depth']):
+                    d_smooth = d_use
+                else:
+                    d_smooth = alpha * d_use + (1 - alpha) * state['ema_depth']
+                state['ema_depth'] = d_smooth
             else:
-                d_smooth = alpha * d_use + (1 - alpha) * state['ema_depth']
-            state['ema_depth'] = d_smooth
+                d_smooth = d_use
+                state['ema_depth'] = None
 
-            t_now = idx / fps_for_ttc
+            t_now = frame_time_seconds
             if np.isfinite(d_smooth):
                 ttc, dzdt = ttc_tracker.update_and_compute(track_id, d_smooth, t_now, ego_speed=ego_speed)
             else:
                 ttc, dzdt = np.nan, np.nan
             ttc_list.append(ttc)
 
-            ecw, _ = compute_ecw_bubble([x1, y1, x2, y2], fused_depth)
+            ecw, _ = compute_ecw_bubble([x1, y1, x2, y2], ecw_depth_map, threshold=args.ecw_depth_threshold)
             ecw_bubbles.append(ecw)
 
             d_fused_box = robust_box_depth(fused_depth, [x1,y1,x2,y2], mask=np.isfinite(fused_depth))
-            width_m, height_m = box_size_meters(x1, y1, x2, y2, d_use, fx_cam, fx_cam)
+            d_pred_box = robust_box_depth(pred_depth_map, [x1,y1,x2,y2], mask=np.isfinite(pred_depth_map))
+            depth_for_size = d_pred_box if np.isfinite(d_pred_box) else d_use
+            width_m, height_m = box_size_meters(x1, y1, x2, y2, depth_for_size, fx_cam, fx_cam)
             meets_size = check_object_size(width_m, height_m)
             patch_mask = np.isfinite(fused_depth[yi1:yi2, xi1:xi2])
             depth_valid_px = int(patch_mask.sum())
 
-            warn_raw, warn_stable = compute_warning_state(f"det_{track_id}", ttc, cls_name, ttc_tracker.warning_states)
+            if USE_SANITY_CHECKS:
+                warn_raw, warn_stable = compute_warning_state(
+                    f"det_{track_id}", ttc, cls_name, ttc_tracker.warning_states
+                )
+            else:
+                warn_raw = np.isfinite(ttc) and (ttc <= get_ttc_threshold(cls_name))
+                warn_stable = warn_raw
+                state['consecutive_frames'] = 1 if warn_stable else 0
+                state['warning_active'] = warn_stable
+                state['last_ttc'] = ttc
+
+            update_episode_state(
+                ep_key=obj_key,
+                cls_name=cls_name,
+                ttc=ttc,
+                dzdt=dzdt,
+                ecw_flag=bool(ecw),
+                warn_raw=warn_raw,
+                warn_stable=warn_stable,
+                frame_idx_val=camera_frame,
+                time_seconds=t_now
+            )
 
             # Get detailed LiDAR stats for the box
-            lidar_in_box = lidar_patch[mask_patch]
+            lidar_in_box = lidar_patch_prior[mask_patch_prior]
             lidar_stats = {
                 'lidar_points': len(lidar_in_box),
-                'lidar_density': len(lidar_in_box) / ((x2-x1+1) * (y2-y1+1)),
+                'lidar_density': len(lidar_in_box) / ((x2-x1+1) * (y2-y1+1)) if lidar_in_box.size else 0.0,
                 'lidar_std': float(np.std(lidar_in_box)) if len(lidar_in_box) > 0 else np.nan,
-                'lidar_completeness': len(lidar_in_box) / mask_patch.size
+                'lidar_completeness': len(lidar_in_box) / mask_patch_prior.size if mask_patch_prior.size else 0.0
             }
             
             # Confidence and fusion weight metrics
             d_mono_box = robust_box_depth(depth_mono_m, [x1,y1,x2,y2], mask=np.isfinite(depth_mono_m))
-            depth_agreement = 1.0 - abs(d_mono_box - d_lidar) / (d_lidar + 1e-6) if np.isfinite(d_lidar) and np.isfinite(d_mono_box) else 0.0
+            depth_agreement = 1.0 - abs(d_pred_box - d_lidar_gt) / (d_lidar_gt + 1e-6) if np.isfinite(d_lidar_gt) and np.isfinite(d_pred_box) else 0.0
             
             # Calculate LiDAR confidence based on point density and completeness
             lidar_conf = (lidar_stats['lidar_density'] * lidar_stats['lidar_completeness']) if lidar_stats['lidar_points'] > 0 else 0.0
@@ -882,13 +1169,13 @@ def main():
                 # Ensure mask_patch matches fusion_weights dimensions
                 mask_region = np.zeros_like(fusion_weights, dtype=bool)
                 # Get the minimum dimensions to avoid index errors
-                h, w = min(mask_patch.shape[0], fusion_weights.shape[0]), min(mask_patch.shape[1], fusion_weights.shape[1])
-                mask_region[:h, :w] = mask_patch[:h, :w]
+                h, w = min(mask_patch_prior.shape[0], fusion_weights.shape[0]), min(mask_patch_prior.shape[1], fusion_weights.shape[1])
+                mask_region[:h, :w] = mask_patch_prior[:h, :w]
                 
                 lidar_weight = float(np.mean(fusion_weights[mask_region])) if mask_region.any() else 0.0
                 camera_weight = 1.0 - lidar_weight  # Camera weight is complement of LiDAR weight
                 
-                print(f"    [FUSION] Box dims: {fusion_weights.shape}, Mask dims: {mask_patch.shape}, "
+                print(f"    [FUSION] Box dims: {fusion_weights.shape}, Mask dims: {mask_patch_prior.shape}, "
                       f"LiDAR weight: {lidar_weight:.3f}")
             except Exception as e:
                 print(f"    [FUSION][WARN] Weight computation failed: {str(e)}")
@@ -918,6 +1205,8 @@ def main():
                 "mono_median_depth": mono_depth_val,
                 "lidar_median_depth": lidar_depth_val, 
                 "fused_median_depth": float(d_fused_box) if np.isfinite(d_fused_box) else np.nan,
+                "pred_median_depth": float(d_pred_box) if np.isfinite(d_pred_box) else np.nan,
+                "pred_depth_source": args.fusion_mode,
                 "depth_agreement": depth_agreement,
                 
                 # Confidence scores
@@ -963,7 +1252,18 @@ def main():
                 "ego_speed": ego_speed
             })
 
-            print(f"    [OBJ][{track_id}] class={cls_name}, conf={conf:.2f}, mono_depth={mono_depth_val:.2f}m, lidar_depth={lidar_depth_val:.2f}m")
+        print(f"    [OBJ][{track_id}] class={cls_name}, conf={conf:.2f}, mono_depth={mono_depth_val:.2f}m, lidar_depth={lidar_depth_val:.2f}m")
+
+        missing_episode_keys = [key for key in list(episode_states.keys()) if key not in seen_episode_keys]
+        for mkey in missing_episode_keys:
+            mstate = episode_states.get(mkey)
+            if not mstate:
+                continue
+            if mstate.get("active") is not None:
+                finalize_episode(mkey, "track_lost")
+            # drop states that are idle to keep map compact
+            if episode_states.get(mkey, {}).get("active") is None:
+                episode_states.pop(mkey, None)
 
         print(f"  [OBJ] boxes: {len(bboxes)}")
 
@@ -978,18 +1278,21 @@ def main():
 
             # Per-box medians from maps (consistent with regular flow)
             mono_patch = depth_mono_m[y1:y2, x1:x2]
-            lidar_patch = Dlidar_small[y1:y2, x1:x2]
-            mask_patch  = Mlidar_small[y1:y2, x1:x2]
+            lidar_patch_prior = Dlidar_prior[y1:y2, x1:x2]
+            mask_patch_prior  = Mlidar_prior[y1:y2, x1:x2]
+            lidar_patch_gt = Dlidar_gt[y1:y2, x1:x2]
+            mask_patch_gt  = Mlidar_gt[y1:y2, x1:x2]
 
             mono_vals  = mono_patch[np.isfinite(mono_patch)]
-            lidar_vals = lidar_patch[mask_patch]
+            lidar_vals = lidar_patch_gt[mask_patch_gt]
             mono_depth_val  = float(np.median(mono_vals))  if mono_vals.size  > 0 else np.nan
             lidar_depth_val = float(np.median(lidar_vals)) if lidar_vals.size > 0 else np.nan
 
             # TTC using fused depth (preferred) or LiDAR-in-box if available
-            t_now = idx / fps_for_ttc
+            t_now = frame_time_seconds
             d_fused = robust_box_depth(fused_depth, [x1,y1,x2,y2], mask=np.isfinite(fused_depth))
-            d_use = d_fused if np.isfinite(d_fused) else z_med
+            d_pred_box = robust_box_depth(pred_depth_map, [x1,y1,x2,y2], mask=np.isfinite(pred_depth_map))
+            d_use = d_pred_box if np.isfinite(d_pred_box) else (d_fused if np.isfinite(d_fused) else z_med)
             if np.isfinite(d_use):
                 ttc, dzdt = ttc_tracker.update_and_compute(base_obj_count + j, d_use, t_now, ego_speed=ego_speed)
             else:
@@ -1004,7 +1307,7 @@ def main():
             lidar_depths.append(lidar_depth_val)
 
             # Check if object is in ECW region
-            in_ecw, _ = compute_ecw_bubble([x1, y1, x2, y2], fused_depth)
+            in_ecw, _ = compute_ecw_bubble([x1, y1, x2, y2], ecw_depth_map, threshold=args.ecw_depth_threshold)
             ecw_bubbles.append(in_ecw)
             
             # Get depth confidence
@@ -1012,14 +1315,27 @@ def main():
             depth_valid_px = int(patch_mask.sum())
             
             # Physical size check
-            width_m, height_m = box_size_meters(x1, y1, x2, y2, d_use, fx_cam, fx_cam)
+            depth_for_size = d_pred_box if np.isfinite(d_pred_box) else d_use
+            width_m, height_m = box_size_meters(x1, y1, x2, y2, depth_for_size, fx_cam, fx_cam)
             meets_size = check_object_size(width_m, height_m)
             
             # Compute warning states with persistence and hysteresis
-            warn_raw, warn_stable = compute_warning_state(
-                f"miss_{base_obj_count + j}", ttc, "Missed", 
-                ttc_tracker.warning_states
-            )
+            miss_id = f"miss_{base_obj_count + j}"
+            if USE_SANITY_CHECKS:
+                warn_raw, warn_stable = compute_warning_state(
+                    miss_id, ttc, "Missed",
+                    ttc_tracker.warning_states
+                )
+            else:
+                warn_raw = np.isfinite(ttc) and (ttc <= get_ttc_threshold("Missed"))
+                warn_stable = warn_raw
+                state = ttc_tracker.warning_states.setdefault(
+                    miss_id,
+                    {'consecutive_frames':0,'warning_active':False,'last_ttc':None,'ema_depth':None}
+                )
+                state['consecutive_frames'] = 1 if warn_stable else 0
+                state['warning_active'] = warn_stable
+                state['last_ttc'] = ttc
 
             # For missed blobs, append CSV with fused depth
             csv_rows.append({
@@ -1030,7 +1346,9 @@ def main():
                 "bbox": (x1, y1, x2, y2),
                 "mono_median_depth": mono_depth_val,
                 "lidar_median_depth": lidar_depth_val,
-                "fused_median_depth": float(d_use) if np.isfinite(d_use) else np.nan,
+                "fused_median_depth": float(d_fused) if np.isfinite(d_fused) else np.nan,
+                "pred_median_depth": float(d_pred_box) if np.isfinite(d_pred_box) else np.nan,
+                "pred_depth_source": args.fusion_mode,
                 "ttc": ttc,
                 "in_ecw": in_ecw,
                 "depth_valid_px": depth_valid_px,
@@ -1076,6 +1394,15 @@ def main():
         out_img_path = os.path.join(OUT_DIR, frame_id + '_overlay.png')
         cv2.imwrite(out_img_path, cv2.cvtColor(final_img, cv2.COLOR_RGB2BGR))
         print(f"  [SAVE] overlay → {out_img_path}")
+        processed_frames += 1
+        last_timestamp_processed = frame_time_seconds
+
+    for ep_key, ep_state in list(episode_states.items()):
+        if ep_state.get("active") is not None:
+            finalize_episode(ep_key, "end_of_run")
+        if episode_states.get(ep_key, {}).get("active") is None and ep_key in episode_states:
+            # remove idle holder to keep structure minimal
+            episode_states.pop(ep_key, None)
 
     # Save metrics CSVs
     csv_path = os.path.join(OUT_DIR, 'object_depth_metrics.csv')
@@ -1113,11 +1440,71 @@ def main():
     
     print('[CSV] saved timing:', timing_path)
 
+    episodes_path = os.path.join(OUT_DIR, 'episodes.csv')
+    if episode_logs:
+        ep_df = pd.DataFrame(episode_logs)
+        if os.path.exists(episodes_path):
+            existing_ep = pd.read_csv(episodes_path)
+            ep_df = pd.concat([existing_ep, ep_df], ignore_index=True)
+        ep_df = ep_df.drop_duplicates(subset=['run_out_dir','episode_id'], keep='last')
+        ep_df.to_csv(episodes_path, index=False)
+        print('[CSV] saved episodes:', episodes_path)
+    else:
+        print('[CSV] no episodes to log')
+
+    summary_path = os.path.join(OUT_DIR, 'run_summary.json')
+    duration_est = processed_frames / args.camera_fps if args.camera_fps > 0 else 0.0
+    duration_est = max(duration_est, last_timestamp_processed if processed_frames else 0.0)
+    run_summary = {
+        "camera_start": args.camera_start,
+        "camera_end": args.camera_end,
+        "lidar_start": args.lidar_start,
+        "lidar_end": args.lidar_end,
+        "frames_planned": planned_frames,
+        "frames_processed": processed_frames,
+        "duration_s": duration_est,
+        "duration_hours": duration_est / 3600.0 if duration_est else 0.0,
+        "fusion_mode": args.fusion_mode,
+        "ecw_source": args.ecw_source,
+        "depth_backend": depth_name,
+        "use_ema": USE_EMA,
+        "use_sanity": USE_SANITY_CHECKS,
+        "use_mining": USE_MISSED_MINING,
+        "hysteresis": T_HYSTERESIS,
+        "lidar_dropout_pct": args.lidar_dropout_pct,
+        "lidar_yaw_jitter_deg": args.lidar_yaw_jitter_deg,
+        "principal_point_jitter_px": [jitter_dx, jitter_dy],
+        "perturb_seed": args.perturb_seed,
+        "lidar_holdout": args.lidar_holdout,
+        "lidar_holdout_ratio": args.lidar_holdout_ratio,
+        "run_out_dir": OUT_DIR
+    }
+    with open(summary_path, 'w', encoding='utf-8') as f_summary:
+        json.dump(run_summary, f_summary, indent=2)
+    print('[JSON] saved run summary:', summary_path)
+
     # Video
     video_path = os.path.join(OUT_DIR, 'output_visualization.mp4')
     create_video(OUT_DIR, video_path, fps=int(round(args.camera_fps)))
 
     # Calculate average performance metrics
+    def _pred_depth(row):
+        val = row.get('pred_median_depth', np.nan)
+        if np.isfinite(val):
+            return val
+        return row.get('fused_median_depth', np.nan)
+
+    abs_rel_vals = [
+        abs(_pred_depth(row) - row['lidar_median_depth']) / (row['lidar_median_depth'] + 1e-6)
+        for row in csv_rows
+        if np.isfinite(row.get('lidar_median_depth')) and np.isfinite(_pred_depth(row))
+    ]
+    sq_rel_vals = [
+        ((_pred_depth(row) - row['lidar_median_depth'])**2) / (row['lidar_median_depth'] + 1e-6)
+        for row in csv_rows
+        if np.isfinite(row.get('lidar_median_depth')) and np.isfinite(_pred_depth(row))
+    ]
+
     avg_metrics = {
         # Total pipeline time including fusion
         'inference_time_ms': np.mean([
@@ -1125,40 +1512,19 @@ def main():
             for row in timing_rows
         ]),
         
-        # Absolute relative error using fused depth as final output
-        'abs_rel_error': np.mean([
-            abs(row['fused_median_depth'] - row['lidar_median_depth']) / (row['lidar_median_depth'] + 1e-6)
-            for row in csv_rows 
-            if np.isfinite(row['lidar_median_depth']) and np.isfinite(row['fused_median_depth'])
-        ]),
+        # Absolute relative error using selected prediction depth as final output
+        'abs_rel_error': float(np.mean(abs_rel_vals)) if abs_rel_vals else np.nan,
         
         # Peak memory usage
         'memory_usage_mb': psutil.Process().memory_info().rss / (1024 * 1024),
         
-        # Square relative error using fused depth
-        'sq_rel_error': np.mean([
-            ((row['fused_median_depth'] - row['lidar_median_depth'])**2) / (row['lidar_median_depth'] + 1e-6)
-            for row in csv_rows 
-            if np.isfinite(row['lidar_median_depth']) and np.isfinite(row['fused_median_depth'])
-        ])
+        # Square relative error using selected prediction depth
+        'sq_rel_error': float(np.mean(sq_rel_vals)) if sq_rel_vals else np.nan
     }
     
     # Add confidence intervals
     for metric in ['abs_rel_error', 'sq_rel_error']:
-        values = []
-        if metric == 'abs_rel_error':
-            values = [
-                abs(row['fused_median_depth'] - row['lidar_median_depth']) / (row['lidar_median_depth'] + 1e-6)
-                for row in csv_rows 
-                if np.isfinite(row['lidar_median_depth']) and np.isfinite(row['fused_median_depth'])
-            ]
-        else:
-            values = [
-                ((row['fused_median_depth'] - row['lidar_median_depth'])**2) / (row['lidar_median_depth'] + 1e-6)
-                for row in csv_rows 
-                if np.isfinite(row['lidar_median_depth']) and np.isfinite(row['fused_median_depth'])
-            ]
-        
+        values = abs_rel_vals if metric == 'abs_rel_error' else sq_rel_vals
         if values:
             ci = np.percentile(values, [2.5, 97.5])
             avg_metrics[f'{metric}_ci_low'] = ci[0]
@@ -1284,6 +1650,13 @@ def compute_warning_state(obj_id, ttc, class_name, state_dict):
     state = state_dict[obj_id]
 
     t_warn = get_ttc_threshold(class_name)
+    if not USE_SANITY_CHECKS:
+        warn_raw = np.isfinite(ttc) and (ttc <= t_warn)
+        state['warning_active'] = warn_raw
+        state['consecutive_frames'] = 1 if warn_raw else 0
+        state['last_ttc'] = ttc
+        return warn_raw, warn_raw
+
     t_clear = t_warn + T_HYSTERESIS
 
     is_vru = any(k in str(class_name).lower() for k in VRU_TOKENS)

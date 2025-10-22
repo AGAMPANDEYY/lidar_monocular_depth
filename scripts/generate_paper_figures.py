@@ -8,7 +8,9 @@ from PIL import Image
 import json
 import argparse
 import subprocess
+from pathlib import Path
 from scipy.interpolate import griddata
+import pandas as pd
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1561,11 +1563,81 @@ def create_visualization_figures(frame_number):
     print("\nAll visualizations completed!")
     print(f"Output directory: {figures_dir}")
 
+
+def plot_lead_time_cdf_from_csv(episodes_csv, out_path):
+    episodes_csv = Path(episodes_csv)
+    out_path = Path(out_path)
+    if not episodes_csv.exists():
+        raise FileNotFoundError(f"episodes csv not found: {episodes_csv}")
+    df = pd.read_csv(episodes_csv)
+    if df.empty:
+        raise ValueError("episodes csv is empty; run eval/ablations.py first")
+    plt.figure(figsize=(7,5))
+    for method, g in df.groupby("Method"):
+        if "warning_issued" not in g or "lead_time_s" not in g:
+            continue
+        mask = g["warning_issued"].astype(bool)
+        lt = pd.to_numeric(g.loc[mask, "lead_time_s"], errors="coerce").dropna().values
+        if lt.size == 0:
+            continue
+        lt = np.sort(lt)
+        y = np.linspace(0, 1, lt.size, endpoint=True)
+        plt.plot(lt, y, label=method)
+    plt.xlabel("Lead time (s)")
+    plt.ylabel("CDF")
+    plt.grid(True, alpha=0.3)
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300)
+
+
+def plot_hysteresis_tradeoff_from_csv(hysteresis_csv, out_path):
+    hysteresis_csv = Path(hysteresis_csv)
+    out_path = Path(out_path)
+    if not hysteresis_csv.exists():
+        raise FileNotFoundError(f"hysteresis sweep csv not found: {hysteresis_csv}")
+    df = pd.read_csv(hysteresis_csv)
+    if df.empty:
+        raise ValueError("hysteresis sweep csv empty; pass --hysteresis_sweep when running ablations")
+    df = df.sort_values("Hysteresis")
+    fig, ax1 = plt.subplots(figsize=(7,5))
+    ax1.plot(df["Hysteresis"], df["CV_TTC"], marker='o', color='tab:blue', label='CV(TTC)')
+    ax1.set_xlabel("Hysteresis (s)")
+    ax1.set_ylabel("CV(TTC) ↓", color='tab:blue')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax2 = ax1.twinx()
+    if "F1" in df.columns:
+        ax2.plot(df["Hysteresis"], df["F1"], marker='s', linestyle='--', color='tab:red', label='F1')
+        ax2.set_ylabel("Proxy F1 ↑", color='tab:red')
+        ax2.tick_params(axis='y', labelcolor='tab:red')
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300)
+
+
 if __name__ == '__main__':
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--frame', type=int, default=27400,
-                    help='Frame number to extract and visualize')
+    parser.add_argument('--frame', type=int, default=None,
+                        help='Frame number to extract and visualize')
+    parser.add_argument('--episodes_csv', type=str, default=None,
+                        help='Path to episodes_aggregated.csv to plot lead-time CDF')
+    parser.add_argument('--hysteresis_csv', type=str, default=None,
+                        help='Path to table6_hysteresis_sweep.csv to plot trade-off figure')
+    parser.add_argument('--out', type=str, default=None,
+                        help='Optional output directory for generated plots (defaults to CSV directory)')
     args = parser.parse_args()
-    
-    create_visualization_figures(args.frame)
+
+    if args.frame is not None:
+        create_visualization_figures(args.frame)
+
+    out_dir = Path(args.out) if args.out else None
+    if args.episodes_csv:
+        episodes_path = Path(args.episodes_csv)
+        target = (out_dir / 'fig_lead_time_cdf.png') if out_dir else episodes_path.with_name('fig_lead_time_cdf.png')
+        plot_lead_time_cdf_from_csv(episodes_path, target)
+        print(f"Lead-time CDF saved to {target}")
+
+    if args.hysteresis_csv:
+        hysteresis_path = Path(args.hysteresis_csv)
+        target = (out_dir / 'fig_hysteresis_tradeoff.png') if out_dir else hysteresis_path.with_name('fig_hysteresis_tradeoff.png')
+        plot_hysteresis_tradeoff_from_csv(hysteresis_path, target)
+        print(f"Hysteresis trade-off plot saved to {target}")

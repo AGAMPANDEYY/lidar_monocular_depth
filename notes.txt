@@ -9,6 +9,7 @@ deactivate
 """
 it would need manual ROI 
 """
+
 python scripts/extract_frames.py --video data/input.avi --max_frames 1000
 
 Camera image- 07543.png data/frames/front/07543.png
@@ -159,9 +160,7 @@ python main.py --camera_start 18000 --camera_end 54736 --lidar_start 7206 --lida
   --miss_near_m 18.0 --miss_far_m 120.0 --miss_min_px 400 --miss_dilate 10 \
 --max_frames 36736 
 
-
 #running for 5minutes 
-
 
 python main.py \
   --camera_start 18000 --camera_end 21000 \
@@ -209,7 +208,6 @@ t: [0.24792871, 1.39406202, -7.89461895]
 
 
 To get more extensive results, you should:
-
 Increase the number of frames processed:
 
 python main.py --ecw_use_fused --max_frames 100
@@ -250,6 +248,72 @@ python eval/ablations.py \
   --hysteresis 0.5
 
 
+for 1 min
+
+[MiDAS]
+
+python eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 300 \
+  --depth_backend monodepth2 \
+  --hysteresis 0.5 \
+  --hysteresis_sweep 0.3 0.5 0.7
+
+
+[Monodepth2]
+python eval/ablations.py \  --main_py main.py \
+  --out_root experiments \      
+  --paper_out paper_out \      
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 300 \
+  --depth_backend monodepth2 \
+  --hysteresis 0.5 \
+  --hysteresis_sweep 0.3 0.5 0.7
+
+[DepthAnythingv2]
+
+python eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 300 \
+  --depth_backend depthanythingv2 \
+  --hysteresis 0.5 \
+  --hysteresis_sweep 0.3 0.5 0.7
+
+[RUN 3 models together MiDAS, Monodepth2, DepthAnythingv2]
+python eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 300 \
+  --hysteresis 0.5 \
+  --hysteresis_sweep 0.3 0.5 0.7
+
+
+[random subset of 100 frames not continous]
+
+python3 eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 100 \
+  --hysteresis 0.5 \
+  --hysteresis_sweep 0.3 0.5 0.7 \
+  --perturb_seed 42
+
+
 GENERATE FIGURES
 
 
@@ -271,4 +335,9 @@ python diagnostic_tool.py --cam_yaml optimized_calibration/camera_optimized.yaml
 
 TTC 
 python scripts/enhanced_ttc_processor.py --frame 27435
+
+
+[LATEST GENERATE FIGURE 21st october]
+
+python scripts/make_dense_depth_plots.py --output paper_figures_combined
 

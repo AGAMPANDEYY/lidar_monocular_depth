@@ -84,30 +84,33 @@ def fuse_confidence(Dlidar, Mlidar, Dmono):
     # Mono confidence
     Wmono = _mono_confidence(Dmono)
     
-    # Combine confidences
+    # Combine confidences with disagreement-aware boost
     W = np.zeros_like(Dlidar, dtype=np.float32)
-    
-    # Where we have both, use ratio of confidences
-    both_valid = Mlidar & np.isfinite(Dmono)
+
+    Dl = Dlidar.astype(np.float32).copy()
+    Dm = Dmono.astype(np.float32).copy()
+
+    both_valid = Mlidar & np.isfinite(Dm)
     if both_valid.any():
-        W[both_valid] = Wlidar[both_valid] / (Wlidar[both_valid] + Wmono[both_valid] + 1e-6)
-    
-    # Where we only have LiDAR
-    lidar_only = Mlidar & ~np.isfinite(Dmono)
-    W[lidar_only] = Wlidar[lidar_only]
-    
-    # Normalize and clip weights
-    if W.max() > 0:
-        W = W / W.max()
-    W = np.clip(W, 0, 1)
+        denom = Wlidar[both_valid] + Wmono[both_valid] + 1e-6
+        ratio = Wlidar[both_valid] / denom
+        disagreement = np.abs(Dl[both_valid] - Dm[both_valid])
+        boost = np.clip((disagreement - 1.0) / 4.0, 0.0, 1.0)
+        ratio = ratio + (1.0 - ratio) * boost
+        W[both_valid] = np.clip(ratio, 0.0, 1.0)
 
-    Dm = Dmono.copy().astype(np.float32)
-    Dl = Dlidar.copy().astype(np.float32)
+    lidar_only = Mlidar & ~np.isfinite(Dm)
+    W[lidar_only] = 1.0
 
-    Dm[~np.isfinite(Dm)] = 0
-    Dl[~np.isfinite(Dl)] = 0
+    mono_only = (~Mlidar) & np.isfinite(Dm)
+    W[mono_only] = 0.0
 
-    fused = W * Dl + (1 - W) * Dm
+    Dl_clean = Dl.copy()
+    Dm_clean = Dm.copy()
+    Dm_clean[~np.isfinite(Dm_clean)] = 0
+    Dl_clean[~np.isfinite(Dl_clean)] = 0
+
+    fused = W * Dl_clean + (1 - W) * Dm_clean
     mask_fused = np.isfinite(Dm) | Mlidar
     fused[~mask_fused] = np.nan
     return fused, W, mask_fused
