@@ -314,6 +314,38 @@ python3 eval/ablations.py \
   --perturb_seed 42
 
 
+[LATEST ttc ecw continous 100 frames while Random for depth fusion etc, reduces bubble distance from 10m to 7.5m ]
+
+python3 eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 100 \
+  --frame_sampling contiguous \
+  --depth_sample_size 50 \
+  --ecw_depth_threshold 7.5 \
+  --hysteresis 0.5 \
+  --hysteresis_sweep 0.3 0.5 0.7
+
+python3 eval/ablations.py \
+  --main_py main.py \
+  --out_root experiments \
+  --paper_out paper_out \
+  --camera_start 18000 --camera_end 19500 \
+  --lidar_start 7206 --lidar_end 7806 \
+  --max_frames 100 \
+  --frame_sampling contiguous \
+  --depth_sample_size 50 \
+  --ecw_depth_threshold 7.5 \
+  --hysteresis 0.5 \
+  --only "Ours (Conf + EMA)" \
+  --depth_backend midas
+
+
+
+
 GENERATE FIGURES
 
 
@@ -340,4 +372,7 @@ python scripts/enhanced_ttc_processor.py --frame 27435
 [LATEST GENERATE FIGURE 21st october]
 
 python scripts/make_dense_depth_plots.py --output paper_figures_combined
+
+python scripts/make_dense_depth_plots.py \  --backend depthanythingv2 \    
+  --output paper_figures_dav2
 

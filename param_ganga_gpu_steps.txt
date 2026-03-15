@@ -1,0 +1,151 @@
+PARAM Ganga — GPU Job Quickstart (Concise Steps)
+
+0) One-time setup
+- Get account + first login: change temp password on first SSH login.
+- Don’t run heavy jobs on login nodes. Use SLURM to schedule compute.
+
+1) SSH to login node (from your laptop)
+ssh <username>@paramganga.iitr.ac.in -p 4422
+
+2) Move your project to the cluster
+# From your laptop -> cluster /home/<username>/proj
+scp -P 4422 -r /path/to/your/project <username>@paramganga.iitr.ac.in:~/proj
+
+3) Prepare environment (once per project)
+- Create a Python venv/conda in ~/proj (if needed).
+- Keep large scratch data in /scratch (faster; temporary).
+
+4) Check available queues/nodes
+sinfo
+
+5) Make a SLURM script for GPU (save as run_gpu.slurm)
+-----------------------------
+#!/bin/bash
+#SBATCH -p gpu
+#SBATCH --gres=gpu:1
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=04:00:00
+#SBATCH --job-name=exp
+#SBATCH --output=logs/%x-%j.out
+
+module load compiler/cuda/10.1 compiler/gcc/7.3.0
+# source ~/proj/.venv/bin/activate   # if you created a venv
+cd $SLURM_SUBMIT_DIR
+srun python main.py
+# Examples:
+# srun python main.py --config configs/exp.yaml
+# srun python eval/ablations.py --run all
+-----------------------------
+
+WHY: -p gpu selects GPU nodes; --gres=gpu:1 allocates one V100; module load ensures CUDA toolchain; srun keeps resources bound to your Python.
+
+6) Submit your job
+sbatch run_gpu.slurm
+
+7) Watch the queue and logs
+squeue -u <username>
+tail -f logs/exp-<JOBID>.out
+
+8) Run interactively on a GPU (debug)
+srun -p gpu --gres=gpu:1 --time=01:00:00 --pty bash -i
+# then run ‘python main.py’ in the shell
+
+9) File hygiene
+- Keep code in /home; big temp data in /scratch.
+- rsync/scp results back when done.
+
+10) Good walltime
+- Set realistic --time; jobs end at limit.
+
+
+Mini-troubleshooting
+- “Permission denied” on SSH: check -p 4422 and username.
+- “CUDA driver not found”: ensure `module load compiler/cuda/10.1` and use gpu partition.
+- “Job stuck PD(Dependency/Resources)”: use `sinfo` to see partitions; shorten --time or request fewer GPUs.
+- Need packages: build wheels in your venv or use Spack to load toolchains.
+
+Folder layout suggestion
+proj/
+  main.py
+  eval/ablations.py
+  run_gpu.slurm
+  logs/
+
+Checklist rationale (why these steps)
+- SSH/port 4422: required external access.
+- SLURM + gpu partition + --gres: guarantees a GPU.
+- srun inside script: binds your Python to allocated GPUs/CPUs.
+- module load cuda: exposes CUDA runtime/driver libs on compute nodes.
+- sinfo/squeue: fast visibility into partitions and job state.
+
+
+
+ 
+0. Create config file
+
+code ~/.ssh/config
+
+Host ganga
+  HostName paramganga.iitr.ac.in
+  Port 4422
+  User swadesh_s_ece.iitr    
+  ConnectTimeout 100
+  ServerAliveInterval 30
+  ServerAliveCountMax 5
+  StrictHostKeyChecking no
+
+
+1. Login to hpc 
+
+ssh ganga
+(Enter password verification code google authenticator)
+
+[INCASE OF ERROR] - 
+# Remove the bad entry for host:port
+ssh-keygen -R '[paramganga.iitr.ac.in]:4422'
+
+2. See what CUDA / GCC / Python modules actually exist
+
+module spider cuda
+module spider gcc
+module spider anaconda
+
+# Always start clean
+module purge
+
+# 1️⃣ Load the prerequisite Spack module
+module load spack/0.17
+
+# 2️⃣ Now load CUDA 11.8 (with its GCC toolchain)
+module load cuda/11.8.0-gcc-14.2.0-dldp
+
+# 3️⃣ (Optional) Load an explicit GCC if you need to compile anything
+# module load gcc/14.2.0-gcc-13.2.0-c74v   # only if your build needs it
+
+# 4️⃣ Confirm everything is active
+module list
+
+
+3. make folder of the project in your node 
+
+mkdir -p ~/proj_agam
+cd ~/proj_agam --> move to the folder
+
+4. Send file from lcoal to folder in the hpc exldue big files if needed [in another terminal]
+
+rsync -avh --progress -e "ssh -p 4422" \
+  --exclude '.git/' \
+  --exclude '.venv/' \
+  --exclude '__pycache__/' \
+  --exclude '.DS_Store' \
+  --exclude 'data/' \
+  --exclude 'experiments/' \
+  --exclude 'paper_out/' \
+  --exclude 'paper_figures*/' \
+  --exclude 'models/*.pth' \
+  --exclude '*.zip' \
+  /Users/agampandey/work/lidar_monocular_depth/ \
+  sukrit_j_mfs.iitr@paramganga.iitr.ac.in:~/agam_project/lidar_monocular_depth/
+
+
